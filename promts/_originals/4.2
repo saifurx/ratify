@@ -1,0 +1,51 @@
+Read CLAUDE.md.
+
+Implement Sprint 4.2: ML forecasting.
+
+Deliverables:
+
+1. forecast_snapshot table: id, tenant_id, snapshot_date, dimension
+   (rep|territory|product|total), dimension_value, committed_cents,
+   best_case_cents, ai_forecast_cents, ai_confidence numeric(3,2),
+   model_version, created_at. Historical snapshots preserved — never
+   overwrite.
+
+2. Forecasting model (Python):
+   - Feature engineering: pipeline composition by stage, deal age,
+     engagement cadence, rep win rate (trailing 90 days), seasonality,
+     historical stage-to-stage conversion.
+   - Model: gradient boosted (XGBoost) per tenant if history suffices
+     (> 200 closed deals), else a pooled model across tenants with
+     tenant_id as a feature. Document the threshold and the choice.
+   - Output: point estimate + prediction interval (quantile regression
+     or bootstrap).
+   - MAPE tracked on a rolling 90-day basis; if MAPE exceeds 25%, alert.
+
+3. Scenario modeling:
+   - POST /api/v1/forecast/scenarios runs the model with modified inputs
+     (e.g., assume close rate drops 10%, assume pipeline slips 30 days).
+   - Returns point estimate under the scenario.
+   - Does NOT alter the committed forecast.
+
+4. API and UI:
+   - GET /api/v1/forecast?date=...&dimension=... returns the snapshot.
+   - GET /api/v1/forecast/accuracy?window=90d returns MAPE trend.
+   - Dashboard widget: AI forecast vs committed, with a confidence band.
+   - Rep-level drill-down.
+
+5. Tests:
+   - MAPE baseline: with 500 synthetic closed deals across 3 tenants,
+     MAPE < 20%.
+   - Scenario modeling produces a different point estimate under
+     modified inputs.
+   - Historical snapshots are never overwritten (unique constraint on
+     tenant+date+dimension).
+   - MAPE alert fires when the synthetic input degrades to >25%.
+
+Acceptance criteria:
+- `make test` green.
+- MAPE benchmark documented in README with the test dataset and model
+  version.
+- UI renders confidence band correctly.
+
+Commit when green.

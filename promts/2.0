@@ -1,0 +1,64 @@
+Read CLAUDE.md.
+
+Implement Sprint 2.0: platform prerequisites for Phase 2+ — Temporal,
+the LLM gateway, and secrets encryption. No product features.
+
+Deliverables:
+
+1. Temporal (self-hosted, single node):
+   - Compose services: temporal (auto-setup image, pinned tag) using the
+     existing Postgres instance with its own databases `temporal` and
+     `temporal_visibility` and its own role `temporal_user` (not app_user;
+     no access to app schemas). temporal-ui behind the `ops` profile.
+   - Namespaces: `ratify` (default, 30-day retention) and `ratify-test`.
+   - Task queues: `crm-default` (Go workers), `agent-default`,
+     `agent-batch` (Python, used from 3.1).
+   - internal/temporalx: client construction, a Go worker host
+     `cmd/worker/main.go`, and helpers that propagate tenant_id and
+     user_id through workflow headers (context propagator). Activities
+     re-establish tenant context via TenantTx; a missing tenant header is
+     ErrNoTenant.
+   - Test helpers using the Temporal Go SDK test environment
+     (time-skipping), so later sprints never wait wall-clock time.
+
+2. LLM gateway:
+   - internal/llm (Go) and agents/llm.py (Python): Complete, Embed.
+     Provider and model from env (document the default choice and why in
+     README; embedding dimension is read from config and recorded with
+     every embedding).
+   - Every call records to `llm_usage` (tenant_id, purpose, provider,
+     model, input_tokens, output_tokens, cost_micros, latency_ms,
+     created_at). RLS + FORCE.
+   - PII minimisation: callers pass structured context; the gateway strips
+     emails and phone numbers from prompts unless the purpose is
+     allow-listed (e.g. drafting an email to that contact).
+   - Timeouts, retries with backoff, and a per-tenant daily budget
+     (cost_micros); budget exceeded → error, not silent truncation.
+   - A deterministic fake provider for tests (`LLM_PROVIDER=fake`).
+   - Static check: no import of a provider SDK outside internal/llm and
+     agents/llm.py.
+
+3. Secrets encryption:
+   - internal/secrets: envelope encryption with a KMS data key (AWS KMS in
+     production; a local key file in dev, refused when ENV=production).
+     Used from 2.2 onward for DKIM keys, OAuth refresh tokens, JWT signing
+     keys.
+
+4. Budget: add temporal (+ui under profile) to Compose with limits from
+   the CLAUDE.md table; `make budget` passes.
+
+5. Tests:
+   - A sample workflow with a 24h timer completes instantly under the
+     time-skipping test env.
+   - Worker restart mid-workflow resumes without re-running a completed
+     activity.
+   - An activity started without a tenant header fails with ErrNoTenant.
+   - temporal_user cannot SELECT from accounts.
+   - LLM usage row written for every fake call; budget exceeded → error.
+   - Secrets round-trip; production mode refuses the local key file.
+
+Agent acceptance:
+- `make test` green.
+- `make budget` passes.
+
+Commit when green.

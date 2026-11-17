@@ -1,0 +1,88 @@
+Read CLAUDE.md.
+
+Implement Sprint 4.1: conversation capture, ASR, and coaching.
+
+Decision required first (document in README and update the CLAUDE.md
+budget table): ASR deployment.
+- Default: hosted ASR + diarization via a provider adapter in
+  agents/asr/ (audio leaves the instance — record this in the data
+  processing notes; provider must support no-retention/no-training).
+- Alternative: local faster-whisper (small/medium, int8) + pyannote in
+  an `asr` service with its own mem_limit (≥ 4 GB) — only if the budget
+  allows and the latency target is met on the actual instance (CPU-only
+  pyannote is slow; measure, don't assume).
+Both sit behind the same `Transcriber` interface so the choice is a
+config switch.
+
+Deliverables:
+
+1. Recording ingestion:
+   - POST /api/v1/calls/upload (multipart). Zoom/Teams/Meet webhook
+     ingestion is out of scope for this sprint (each needs an app
+     registration) — leave an interface and a follow-up note.
+   - Consent metadata required (granted_by, granted_at, recording_purpose,
+     consent_mechanism, jurisdiction). Missing → 403. Document that some
+     jurisdictions require all-party consent.
+   - Raw audio to S3 (SSE-KMS, per-tenant prefix, private). Call row
+     status 'uploaded' → 'transcribing' → 'transcribed' → 'analyzed'.
+
+2. ASR pipeline (Temporal workflow per call, idempotent activities):
+   - Transcribe + diarize via the Transcriber interface.
+   - Transcript format: {segments: [{speaker, start, end, text}],
+     language}.
+   - PII redaction with Presidio (credit cards, SSN/Aadhaar/PAN, bank
+     account numbers, emails, phone numbers) BEFORE the transcript is
+     stored. Only the redacted transcript is ever persisted or sent to an
+     LLM.
+   - Retries via Temporal; re-running a workflow for the same call is a
+     no-op once 'transcribed'.
+
+3. Analysis (via internal/llm, on the redacted transcript only):
+   - Structured summary (JSON schema enforced): deal_context, objections[],
+     next_steps[], commitments[], competitor_mentions[].
+   - Topic detection: configurable topic list per tenant.
+   - Sentiment per segment and overall.
+   - Coaching scorecard: discovery depth, talk ratio, objection handling,
+     scored against the tenant's methodology. Stored on the call; the API
+     returns it only to manager/admin (authz test).
+   All analysis outputs are derived annotations with model_version.
+
+4. CRM integration:
+   - When analyzed, create an Activity (type 'call', created_by
+     'ai:call-pipeline@<version>') linked to contact and opportunity, with
+     the summary. This is a system-generated log entry, not an AI business
+     decision; it is audit-logged and reversible by deleting the call.
+   - Update opportunity.last_contact_at and account.last_contact_at
+     (columns from 1.1) from the call timestamp.
+   - Emit call.analyzed.
+
+5. Retention and deletion:
+   - Configurable per tenant; defaults: audio 30 days, redacted
+     transcripts 1 year. (Audio is unredacted and may contain spoken card
+     numbers — keep it short. Document PCI implications.)
+   - Retention job runs per tenant (per CLAUDE.md), deletes S3 objects and
+     rows, writes audit stubs.
+   - DELETE /api/v1/calls/{id} removes audio, transcript and analysis,
+     keeps an audit stub (id, tenant, deleted_by, deleted_at).
+
+6. Tests:
+   - Upload without consent → 403.
+   - Transcript has ≥ 2 diarized speakers on the 2-speaker fixture (fake
+     transcriber in unit tests; one integration test against the real
+     adapter behind a build tag).
+   - Summary validates against the JSON schema.
+   - Redaction removes a credit card and a phone number from the fixture
+     transcript; the LLM fake receives only redacted text.
+   - Rep cannot read the coaching scorecard; manager can.
+   - Retention job deletes audio older than the configured window.
+
+Agent acceptance:
+- `make test` green; `make budget` passes.
+- Activity appears on the opportunity timeline after analysis.
+
+Ops exit gate (human — docs/ops/asr-benchmark.md): on the production
+instance, a 10-minute call transcribes and analyzes in under 3 minutes and
+diarization is correct on the 2-speaker test file. If local ASR misses
+this, switch to hosted.
+
+Commit when the agent acceptance is green.

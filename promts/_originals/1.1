@@ -1,0 +1,50 @@
+Read CLAUDE.md.
+
+Implement Sprint 1.1: the CRM entity model and API. Do NOT build UI yet.
+
+Entities (each in its own internal module with repository, service, handler):
+- Account (exists — extend with: industry text, employee_count int,
+  website text, owner_id uuid)
+- Contact (first_name, last_name, email citext, phone text, title text,
+  account_id uuid FK, owner_id uuid, do_not_contact bool, consent_status
+  text CHECK IN ('none','granted','revoked'), consent_source text,
+  consent_captured_at timestamptz)
+- Opportunity (name, account_id uuid FK, pipeline_id uuid FK, stage_id uuid
+  FK, amount_cents bigint, currency text DEFAULT 'USD', close_date date,
+  owner_id uuid, status text CHECK IN ('open','won','lost'))
+- Pipeline (name, is_default bool) — one per tenant
+- Stage (pipeline_id, name, ordinal int, is_closed_won bool,
+  is_closed_lost bool)
+- Activity (type text CHECK IN ('note','email_sent','email_received',
+  'call','meeting','task'), subject text, body text, occurred_at
+  timestamptz, contact_id uuid NULL, opportunity_id uuid NULL,
+  account_id uuid NOT NULL, metadata jsonb)
+
+All tables: ENABLE + FORCE RLS, tenant_id column, RLS policy via
+current_tenant(), indexes prefixed with tenant_id, updated_at trigger.
+Add a `record_event` helper that appends to outbox inside the caller's tx:
+contact.created, contact.updated, opportunity.created,
+opportunity.stage_changed, activity.logged.
+
+Deliverables:
+- One migration per entity (or one migration with all — your call, but
+  reversible).
+- internal/{account,contact,opportunity,pipeline,activity}/ with repo +
+  service + handler.
+- REST endpoints under /api/v1: standard CRUD, list with pagination
+  (cursor-based, tenant-scoped), filter by owner_id and status.
+- GraphQL read layer for account-360: account + contacts + open
+  opportunities + last 20 activities, single query.
+- 10+ tests per module: tenant isolation (assert a contact created under
+  tenant A is invisible under tenant B), RLS WITH CHECK rejects cross-
+  tenant insert, event emitted exactly once on create/update, pagination
+  cursor does not leak across tenants.
+
+Acceptance criteria:
+- `make test` green with all new tests.
+- Cross-tenant read AND write both rejected.
+- Events appear on Kafka with the correct tenant_id in headers.
+- No repository method has `WHERE tenant_id` — RLS supplies it. If you
+  find yourself adding one, stop and flag it.
+
+Commit when green.

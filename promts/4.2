@@ -1,0 +1,65 @@
+Read CLAUDE.md.
+
+Implement Sprint 4.2: ML forecasting.
+
+Deliverables:
+
+1. forecast_snapshot: id, tenant_id, snapshot_date, dimension
+   (rep|territory|product|total), dimension_value text (use '' for total),
+   committed_cents, best_case_cents, ai_forecast_cents, ai_low_cents,
+   ai_high_cents, ai_confidence numeric(3,2), model_version, created_at.
+   UNIQUE (tenant_id, snapshot_date, dimension, dimension_value,
+   model_version). Snapshots are append-only: no UPDATE/DELETE grants plus
+   a trigger that raises on UPDATE/DELETE. Derived annotation per
+   CLAUDE.md.
+
+2. Forecasting model (Python, Temporal batch activity, runs per tenant):
+   - Features: pipeline composition by stage phase, deal age, engagement
+     cadence, rep win rate (trailing 90 days), seasonality, historical
+     phase-to-phase conversion.
+   - Model: XGBoost per tenant when the tenant has > 200 closed deals.
+     Otherwise a heuristic baseline (stage-phase weighted pipeline ×
+     historical conversion) for that tenant. A pooled cross-tenant model is
+     NOT built by default: it trains on other tenants' data, which breaks
+     tenant isolation. It may be enabled only by an explicit
+     enterprise-level setting `forecast.allow_pooled_training=true`,
+     documented, and trained by a dedicated role per CLAUDE.md
+     cross-tenant rules. Document the threshold and choice in README.
+   - Output: point estimate + 80% prediction interval (quantile regression
+     or bootstrap).
+   - Accuracy: once actuals exist, compute MAPE on a rolling 90-day window
+     into forecast_accuracy (tenant_id, window_end, mape, n). If MAPE > 25%
+     with n ≥ 20, raise an alert. With n < 20 report "insufficient data",
+     never a number.
+
+3. Scenario modeling:
+   - POST /api/v1/forecast/scenarios with modifiers (close-rate delta,
+     slip days, amount haircut). Returns the point estimate + interval under
+     the scenario. Never writes a snapshot or alters the committed forecast.
+
+4. API and UI:
+   - GET /api/v1/forecast?date=&dimension= returns snapshots (authz.Scope:
+     reps see their own row, managers their team, admin all).
+   - GET /api/v1/forecast/accuracy?window=90d returns the MAPE trend.
+   - Dashboard widget: AI forecast vs committed with the interval as a
+     confidence band; rep-level drill-down.
+
+5. Tests (behaviour, not model quality):
+   - Pipeline trains and predicts on a synthetic dataset (500 closed deals,
+     3 tenants) and produces intervals where low ≤ point ≤ high.
+   - Per-tenant training never reads another tenant's rows (runs under
+     set_tenant; assert by query log) when pooled training is off.
+   - Scenario with a negative close-rate delta produces a lower estimate.
+   - Inserting a second snapshot for the same key fails; UPDATE fails.
+   - Two reps on the same date produce two snapshot rows.
+   - MAPE alert fires when synthetic actuals are degraded to > 25%;
+     n < 20 reports insufficient data.
+
+Agent acceptance:
+- `make test` green.
+- MAPE benchmark on the synthetic dataset documented in README with the
+  dataset generator seed and model version (a benchmark, not a test
+  threshold).
+- UI renders the confidence band (Playwright screenshot test).
+
+Commit when green.

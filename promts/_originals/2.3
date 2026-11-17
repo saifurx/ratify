@@ -1,0 +1,49 @@
+Read CLAUDE.md.
+
+Implement Sprint 2.3: native calendar and meeting scheduling.
+
+Deliverables:
+
+1. availability table: user_id, day_of_week, start_time, end_time,
+   timezone, buffer_before_min, buffer_after_min. Configurable per user.
+   Default: Mon-Fri 9-5 in the user's timezone.
+
+2. booking_page: id, tenant_id, user_id or team_id, slug (unique per
+   tenant), title, duration_min, description, required_fields jsonb
+   (default: name, email), redirect_url, active bool.
+
+3. calendar_sync: users connect Google Calendar and/or Microsoft 365 via
+   OAuth. Store refresh_token encrypted. Sync events bidirectionally
+   hourly via a Temporal workflow. Use CalDAV/ICS as a fallback for
+   providers without OAuth.
+
+4. booking flow:
+   - GET /book/{tenant_slug}/{page_slug} renders available slots for the
+     next 14 days based on availability - existing calendar events -
+     other bookings.
+   - POST /book/{tenant_slug}/{page_slug} creates the meeting, sends
+     confirmation email (through Postal), creates a Contact if new,
+     creates an Activity, emits meeting.booked.
+   - Reschedule and cancel endpoints with confirmation links.
+
+5. Meeting prep brief: when a meeting is booked, generate a brief for
+   the rep containing account context, deal stage, recent activities,
+   contact role if known. Store on the meeting record. This is a READ
+   only AI action; no decision gate needed yet.
+
+6. Tests:
+   - Booking a slot that overlaps an existing calendar event → rejected.
+   - Booking a slot with insufficient buffer → rejected.
+   - Reschedule updates both the meeting and the synced calendar event.
+   - Timezone is preserved: a 9am slot in NY is booked as 9am NY time
+     for the prospect in another timezone.
+
+Acceptance criteria:
+- `make test` green.
+- A booking page is bookable end-to-end and lands on the rep's real
+  calendar.
+- The confirmation email arrives.
+- No slot double-booking.
+
+Commit when green. Phase 2 exit gate: live send test + calendar
+integration test both pass.

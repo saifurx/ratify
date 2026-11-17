@@ -1,0 +1,58 @@
+Read CLAUDE.md.
+
+Implement Sprint 4.1: conversation capture, ASR, and coaching.
+
+Deliverables:
+
+1. Recording ingestion:
+   - POST /api/v1/calls/upload (multipart) or recording_url from a
+     Zoom/Teams/Meet webhook. Tenant-scoped. Consent metadata required
+     (granted_by, granted_at, recording_purpose). Refuse if consent is
+     missing.
+   - Store raw audio in S3. Write a call row with status
+     'uploaded'→'transcribing'→'transcribed'→'analyzed'.
+
+2. ASR pipeline (Python):
+   - Whisper (open-weight, run locally with faster-whisper) OR a hosted
+     ASR if latency demands — document the choice.
+   - Diarization with pyannote.
+   - Transcript format: {segments: [{speaker, start, end, text}],
+     language}. Store on the call row.
+   - Retry via Temporal on failure. Idempotent.
+
+3. Analysis:
+   - Summary (LLM, structured): deal context, objections, next steps,
+     commitments, competitor mentions.
+   - Topic detection: configurable topic list per tenant.
+   - Sentiment per segment and overall.
+   - Coaching scorecard: score against the configured methodology
+     (discovery depth, talk ratio, objection handling). Output is
+     stored on the call and visible to managers only.
+
+4. CRM integration:
+   - When call is analyzed, create an Activity (type='call') linked to
+     the contact and opportunity. Attach summary.
+   - Update opportunity.last_contact_at.
+   - Emit call.analyzed.
+
+5. Retention and redaction:
+   - Configurable retention (default 90 days audio, 1 year transcripts).
+   - Redact PII (credit cards, SSNs) from transcripts before storage
+     using presidio. Audio not redacted (transcripts are the surface).
+   - DELETE /api/v1/calls/{id} removes audio and transcript but keeps
+     an audit stub.
+
+6. Tests:
+   - Upload without consent → 403.
+   - Transcript includes diarized speakers.
+   - Summary is structured, not free text.
+   - PII redaction catches a credit card in the test transcript.
+   - Retention job deletes audio older than 90 days.
+
+Acceptance criteria:
+- `make test` green.
+- A 10-minute call transcribes and analyzes in under 3 minutes.
+- Transcripts are diarized correctly on a 2-speaker test file.
+- Activity appears on the opportunity timeline.
+
+Commit when green.

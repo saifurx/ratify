@@ -1,0 +1,99 @@
+Read CLAUDE.md.
+
+Implement Sprint 1.2: inbound lead capture, consent/suppression,
+enrichment, and lead scoring v0.
+
+Consent rule (applies here and in every later sprint): a person may be
+converted to a contact and receive outreach only if their CURRENT state is
+(consent_status = 'granted') OR (lawful_basis = 'legitimate_interest' AND
+consent_status <> 'revoked'), AND they are not suppressed, AND
+do_not_contact = false. Implement this once as `consent.CanContact(ctx,
+email)` and reuse it everywhere.
+
+Deliverables:
+
+1. Lead model: id, tenant_id, email citext, first_name, last_name, company,
+   domain, source text, source_detail jsonb, consent_status text,
+   lawful_basis text, consent_source text, consent_captured_at timestamptz,
+   raw_payload jsonb, first_captured_at timestamptz, created_at,
+   deleted_at NULL. RLS + tenant_id + UNIQUE (tenant_id, id) + indexes.
+   Never hard-delete (soft delete via deleted_at).
+   Scores are NOT stored on the lead row: `lead_scores` (tenant_id,
+   lead_id, score int, reasons jsonb, model_version, produced_at) — a
+   derived annotation per CLAUDE.md "AI write classes".
+
+2. Consent and suppression:
+   - consent_ledger (tenant_id, email citext, lead_id NULL, contact_id
+     NULL, status, lawful_basis, source, captured_at, ip, user_agent).
+     Keyed by EMAIL, append-only (no UPDATE/DELETE grants).
+   - suppression_list (tenant_id, email citext NULL, domain text NULL,
+     reason text, added_by text, added_at). Populated by hard bounces,
+     complaints, opt-outs, and manual admin adds.
+   - Ingestion MUST check suppression synchronously before ANY DB write.
+     A suppressed submission returns exactly the same status code, body
+     and timing class as a successful one (`{"status":"received"}`). Never
+     reveal suppression to the sender. Nothing is stored for it — not the
+     email, not IP/UA, not in logs (log only a counter metric).
+
+3. Hosted form endpoint: POST /api/v1/inbound/leads (public, no auth).
+   Tenant is resolved from a `tenant_token` query param via a SECURITY
+   DEFINER function `resolve_tenant_token(text) RETURNS uuid` (see
+   CLAUDE.md cross-tenant rules); unknown token → 404. Rate-limited by IP
+   and by tenant in Redis (keys prefixed `t:{tenant_id}:`). Capture UTM
+   params, referrer, IP, UA. First-party cookie for session continuity
+   (no third-party tracking).
+
+4. Dedupe: match on email (citext) within the tenant → merge into the
+   existing lead, preserve first_captured_at, append the new consent event
+   to the ledger. Fallback match on (domain, lower(first_name||last_name))
+   only FLAGS a possible duplicate (`possible_duplicate_of`) for human
+   review; it never auto-merges, because consent belongs to an email
+   address and must not transfer between addresses.
+
+5. Enrichment (v1): a Python worker (pyworker service) that takes a
+   domain and returns firmographics from a native public crawler. Do NOT
+   call paid third-party enrichment APIs (RDAP for domain age is allowed
+   and documented). Fetch robots.txt first and respect it, rate-limit per
+   host, cache responses in Redis for 7 days (`global:enrich:{domain}` —
+   public data, intentionally cross-tenant, documented). Store raw HTML
+   hash + parsed fields in `enrichment_raw` for provenance. Enrichment is
+   asynchronous; leads are usable before it finishes.
+
+6. Lead scoring v0 (Python): XGBoost classifier trained on the pilot's
+   seed data OR on a documented synthetic dataset if no history exists.
+   When trained on synthetic data, model_version is prefixed `synthetic-`
+   and the UI must label the score "preliminary". Features: source,
+   company size (from enrichment, NULL allowed), domain age, email domain
+   type, whether the lead's domain matches an existing open opportunity's
+   account. Output: score int 0-100 plus a reasons array (SHAP-lite).
+   Scores are reproducible from (features, model_version).
+   Exposed by the pyworker on an internal-only port (not via the public
+   API router) and authenticated with a service token.
+
+7. Lead-to-opportunity conversion: POST /api/v1/leads/{id}/convert
+   requires consent.CanContact(email) = true, else 403 with a reason code.
+   Creates an Account, Contact (copying lawful_basis/consent fields),
+   Opportunity in one transaction. Emits lead.converted.
+
+8. Tests:
+   - Suppressed email → response identical to success; no lead row, no
+     ledger row, no PII in logs.
+   - Duplicate email → merged, first_captured_at preserved, ledger has
+     both events, one lead row.
+   - Same name + domain, different email → two leads, second flagged
+     possible_duplicate_of, ledgers NOT merged.
+   - Score is deterministic given the same features + model version.
+   - Conversion without a valid consent basis → 403.
+   - Cross-tenant: a lead created via tenant A's token is invisible to
+     tenant B.
+   - Crawler: a test site with robots.txt Disallow is not fetched (test
+     fails if it is).
+
+Agent acceptance:
+- `make test` green.
+- A form POST with valid data creates a lead and emits lead.created
+  within 1 second; with a cache-hit enrichment, lead.scored follows within
+  5 seconds. Cold-crawl latency is measured and documented, not asserted.
+- Suppression check happens BEFORE any DB write (assert via query log).
+
+Commit when green.

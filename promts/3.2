@@ -1,0 +1,111 @@
+Read CLAUDE.md.
+
+Implement Sprint 3.2: the decision gate service and the first three
+agents.
+
+Deliverables:
+
+1. Decision gate service — SEPARATE Go service, cmd/decisiongate/, with
+   its own DB role `gate_user` (INSERT + SELECT on gate.decision_records
+   only; read-only views it needs for consent/suppression checks). Budget
+   per CLAUDE.md.
+   - POST /v1/gate/evaluate: (agent_id, tool_name, input, evidence,
+     requested_by) → {decision_record_id, approved, reasons[], token?}.
+     The caller's tenant comes from its service token, never the body.
+   - Deterministic rule engine (internal/decisiongate/rules.go):
+     - Permission: the AGENT PRINCIPAL's granted permissions (from the
+       Agent Studio config, Sprint 3.3; default config file until then)
+       include the tool's required permission. (This is an application
+       permission, not a DB role.)
+     - Tenant match: every tenant-scoped id in input belongs to the
+       caller's tenant (checked under the caller's RLS context).
+     - Consent/suppression: for any tool that writes to a contact or
+       sends outreach, consent.CanContact(recipient) must be true.
+     - Business-rule hooks: an interface `BusinessRule` with no-op
+       implementations for margin, discount, and stage gates. Sprint 5.1's
+       CPQ rules engine plugs in through this interface; do not duplicate
+       pricing logic here.
+     - Rate limits: per agent, per tenant, per hour.
+   - Outcomes: approved | rejected | ambiguous. Optional LLM review only
+     for ambiguous; it returns a recommendation; the final decision is
+     recorded as rule-derived or `needs_human` (queued for a human in the
+     approval inbox, item 4). LLM review never approves on its own when a
+     rule failed.
+   - Gate unreachable → callers fail closed.
+
+2. Decision records: schema `gate`, table `decision_records`: id uuid PK,
+   tenant_id, agent_id, tool_name, input_hash text, input_canonical jsonb,
+   rules_evaluated jsonb, rules_outcome jsonb, llm_review jsonb NULL,
+   approved bool, status ('approved','rejected','needs_human'), rationale
+   text, decided_by text ('rules' | 'human:<user_id>'),
+   recommendation_id NULL, created_at.
+   Immutability:
+   - Table owned by a NOLOGIN role `gate_owner`; no LOGIN role owns it.
+   - No UPDATE/DELETE/TRUNCATE grants to any role.
+   - BEFORE UPDATE OR DELETE trigger that raises (protects against owner
+     and future grant mistakes). Human decisions are NEW rows that
+     reference the original, never edits.
+   - ENABLE + FORCE RLS on tenant_id.
+
+3. Tokens: on approval the gate returns a 5-minute token signed with an
+   Ed25519 key (private key via internal/secrets; public key distributed
+   to the API; key id in the header for rotation). Claims: agent_id,
+   tool_name, input_hash, tenant_id, decision_record_id, exp, jti.
+   input_hash = SHA-256 of RFC 8785 (JCS) canonical JSON of the tool input
+   — the same library on both sides, with shared test vectors.
+   Write tools in the tool bus verify signature, expiry, every claim, and
+   single use (jti stored); any mismatch → 403.
+
+4. Human approval inbox: GET/POST /api/v1/approvals for `needs_human`
+   records; an approval/rejection writes a new decision record
+   (decided_by human) and, if approved, issues the token to the waiting
+   workflow via a Temporal signal. Minimal UI list in web/.
+
+5. First agents:
+   - Lead Scoring Agent: reads lead + account + activity, recomputes score
+     with the current model version, writes a new `lead_scores` row
+     (derived annotation — no gate token needed, per CLAUDE.md) and logs
+     the run.
+   - Deal Health Agent: reads opportunity + contacts + activities,
+     produces a 0-100 health score + risk factors as an ai_annotation.
+   - Next-Best-Action Agent: produces recommendations
+     (recommendation_text, action_type, urgency, evidence) stored in
+     `recommendations` with a decision record (status approved for
+     DISPLAY; rationale included). It performs no CRM writes.
+
+6. Accept/reject (decided — one model):
+   - The rep clicks Accept → POST /api/v1/deals/{id}/actions/{rec_id}.
+     The action executes as a NORMAL authenticated rep write (rep's authz
+     scope, rep's consent checks) — it does not need a gate token because
+     no agent is performing it.
+   - The API records the human decision as a new decision record
+     (decided_by human:<user>, recommendation_id) for the audit trail.
+   - Reject captures a reason (dropdown + optional text) the same way, for
+     calibration.
+   - UI: recommendation cards on the deal detail page.
+
+7. Enable the 3.1 write tool save_draft_to_sequence through the gate.
+
+8. Tests:
+   - Write tool with no token → 403.
+   - Expired token → 403. Token for a different input (hash mismatch) →
+     403. Reused token (same jti) → 403. Token from tenant A used in tenant
+     B → 403.
+   - JCS canonicalisation: shared test vectors produce identical hashes in
+     Go and Python.
+   - UPDATE and DELETE on gate.decision_records fail for app_user,
+     gate_user, agent_worker, app_migrator (and the trigger blocks even the
+     owner role in a SET ROLE test).
+   - An agent attempting a CRM write without the gate is refused by the
+     tool bus.
+   - Every NBA recommendation has a decision record with rationale.
+   - Accept writes a human decision record linked to the recommendation.
+   - Gate down → write tool fails closed.
+
+Agent acceptance:
+- `make test` green including all gate and immutability tests.
+- Every AI recommendation has a queryable decision record.
+- Human accept/reject/override is captured with reason.
+- No AI business mutation succeeds without passing the gate.
+
+Commit when green. This is the Phase 3 exit gate.

@@ -1,0 +1,85 @@
+Read CLAUDE.md.
+
+Implement Sprint 1.1: users/teams/authorization, the CRM entity model and
+API. Do NOT build UI yet.
+
+Part A — Identity and in-tenant authorization (build first):
+- users (id uuid, tenant_id, external_subject text — FerrisKey `sub`,
+  email citext, display_name, role text CHECK IN ('rep','manager','admin',
+  'finance','legal'), active bool). UNIQUE (tenant_id, external_subject).
+- teams (id, tenant_id, name, manager_user_id) and team_members
+  (tenant_id, team_id, user_id).
+- Users are upserted on first authenticated request from the token claims
+  (dev mode: from X-User-Id + an X-Role header).
+- internal/authz: `Scope(ctx)` returns the visibility scope —
+  rep: owner_id = self; manager: owner_id IN team members; admin/finance/
+  legal: whole tenant. Repositories apply this scope to list/get/update.
+  This is the ONLY permitted extra predicate besides RLS; it is an owner
+  filter, never a tenant filter.
+- Service principals (`agent`, `system`) are recognised by token type and
+  get read-only tenant scope unless a later sprint grants more.
+
+Part B — Entities (each in its own internal module with repository,
+service, handler):
+- Account (exists — extend with: industry text, employee_count int,
+  website text, owner_id uuid, last_contact_at timestamptz NULL)
+- Contact (first_name, last_name, email citext, phone text, title text,
+  account_id uuid, owner_id uuid, do_not_contact bool DEFAULT false,
+  consent_status text CHECK IN ('none','granted','revoked'),
+  lawful_basis text CHECK IN ('consent','legitimate_interest','contract')
+  NULL, consent_source text, consent_captured_at timestamptz)
+- Pipeline (name, is_default bool). A tenant may have many pipelines;
+  exactly one default, enforced by a partial unique index
+  (tenant_id) WHERE is_default.
+- Stage (pipeline_id, name, ordinal int, phase text CHECK IN ('prospecting',
+  'discovery','proposal','negotiation','closed_won','closed_lost')).
+  `phase` is the tenant-independent mapping later sprints use; stage names
+  are free text.
+- Opportunity (name, account_id, pipeline_id, stage_id, amount_cents
+  bigint, currency text DEFAULT 'USD', close_date date, owner_id uuid,
+  status text CHECK IN ('open','won','lost'), last_contact_at timestamptz
+  NULL)
+- Activity (type text CHECK IN ('note','email_sent','email_received',
+  'call','meeting','task'), subject text, body text, occurred_at
+  timestamptz, contact_id uuid NULL, opportunity_id uuid NULL,
+  account_id uuid NOT NULL, metadata jsonb, created_by text — user id or
+  'ai:<producer>@<version>')
+
+Schema rules (from CLAUDE.md "Data model rules"):
+- CREATE EXTENSION IF NOT EXISTS citext (in the migration, as app_migrator).
+- All tables: tenant_id NOT NULL, ENABLE + FORCE RLS, policy via
+  current_tenant() (USING + WITH CHECK), UNIQUE (tenant_id, id), indexes
+  led by tenant_id, updated_at trigger.
+- ALL foreign keys are composite, e.g.
+  FOREIGN KEY (tenant_id, account_id) REFERENCES accounts(tenant_id, id).
+  owner_id → users(tenant_id, id). Plain single-column FKs between tenant
+  tables are a bug.
+
+Events: add a `record_event` helper that appends to outbox inside the
+caller's tx: contact.created, contact.updated, opportunity.created,
+opportunity.stage_changed, activity.logged.
+
+Deliverables:
+- Migrations (one per entity or one combined — your call, but reversible).
+- internal/{user,authz,account,contact,opportunity,pipeline,activity}/.
+- REST endpoints under /api/v1: standard CRUD, list with cursor
+  pagination (opaque, signed cursor that encodes no tenant id), filter by
+  owner_id and status.
+- GraphQL read layer for account-360: account + contacts + open
+  opportunities + last 20 activities, single query. Same authz scope as
+  REST.
+- 10+ tests per module including: tenant isolation (contact created under
+  tenant A invisible under tenant B), RLS WITH CHECK rejects cross-tenant
+  insert, composite FK rejects a contact pointing at another tenant's
+  account, event emitted exactly once on create/update, pagination cursor
+  from tenant A returns nothing under tenant B, rep cannot read another
+  rep's opportunity, manager can read team members' opportunities.
+
+Agent acceptance:
+- `make test` green with all new tests.
+- Cross-tenant read AND write both rejected, including via FK reference.
+- Events appear on Kafka with the correct tenant_id and event_id headers.
+- No repository method has `WHERE tenant_id` — RLS supplies it. If you
+  find yourself adding one, stop and flag it.
+
+Commit when green.

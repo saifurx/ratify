@@ -1,0 +1,98 @@
+Read CLAUDE.md.
+
+Implement Sprint 5.2: hardening, DR drill preparation, and handover
+runbooks.
+
+This prompt has two parts. Claude completes Part A (agent work) and
+prepares Part B (ops work) as checklists. Claude must NOT mark any Part B
+item as done; those require named humans and real infrastructure.
+
+PART A — Agent work
+
+1. Security review → docs/SECURITY_REVIEW.md with PASS/FAIL and
+   file:line evidence per item. Automate every check that can be automated
+   as `make security-check`:
+   - Every tenant table: ENABLE + FORCE RLS, policy uses current_tenant()
+     in USING + WITH CHECK, has tenant_id NOT NULL, all FKs composite.
+   - No role has BYPASSRLS; the only cross-tenant policies are the ones
+     listed in CLAUDE.md (enumerate them and fail on any other).
+   - No LOGIN role owns a table that RLS protects.
+   - No package outside internal/db imports pgxpool; no query bypasses
+     TenantTx (static check).
+   - No `SET SESSION` / `set_config(..., false)` anywhere in code or SQL.
+   - gate.decision_records and forecast_snapshot: UPDATE/DELETE impossible
+     (test).
+   - No provider SDK import outside internal/llm / agents/llm.py.
+   - Secrets: none in the repo (gitleaks), all encrypted via
+     internal/secrets.
+   - Dependency scan: govulncheck, pip-audit, npm audit. Fix every HIGH or
+     CRITICAL; document the rest with justification.
+   - FerrisKey: config sets a non-default admin credential, session
+     timeout, and admin 2FA — verify the pinned FerrisKey version supports
+     each; if one isn't supported, report it as FAIL with a compensating
+     control (e.g. admin console reachable only via SSH tunnel).
+
+2. Secret rotation procedure (docs/SECRETS.md) with a script per secret:
+   database passwords, DKIM keys (selector rotation), gate signing key
+   (key-id rotation), JWT/OIDC client secrets, LLM API keys, FerrisKey
+   admin, KMS data key re-wrap.
+
+3. Runbooks in docs/:
+   - DEPLOY.md — migrations (as app_migrator, expand/contract) before app
+     containers, per CLAUDE.md "Deploy order"; smoke tests; `make budget`.
+   - ROLLBACK.md — app revert, migration down (only for expand-phase
+     migrations), decision guide for keeping vs reverting data; outbox and
+     Temporal implications.
+   - RESTORE.md — from EBS snapshot, from pg_dump, from both (update the
+     1.4 version).
+   - ONBOARD.md — add a tenant: create tenant, FerrisKey realm + clients
+     (users and agent), users/teams, sending domain + DNS + warmup start,
+     booking pages, import (cmd/import with lawful_basis).
+   - INCIDENT.md — cross-tenant alert (first action: stop the API),
+     deliverability drop, agent runaway loop (disable via Agent Studio,
+     terminate workflows), Kafka down (outbox buffers; relay resumes),
+     Temporal down, decision gate down (writes fail closed — expected),
+     LLM provider down / budget exhausted, PgBouncer down, backup failure.
+   - ESCALATION.md — exit-path triggers with the metric and threshold for
+     each: Postgres → RDS, multi-instance, pgvector → Qdrant (filtered
+     recall miss or HNSW swap), shard by tenant, hosted ASR.
+
+4. Observability dashboards finalized (deploy/grafana/):
+   - Decision record volume by agent and by status.
+   - Recommendation acceptance/override rates.
+   - Deliverability per domain: bounce, complaint, send volume vs cap,
+     DMARC policy.
+   - Cross-tenant anomaly counter (alert on > 0).
+   - LLM cost per tenant per day (from llm_usage).
+   - Forecast MAPE trend.
+   - Outbox lag and dead letters; backup age.
+
+5. scripts/restore-test.sh extended to measure and print RTO (wall time to
+   a passing `make test-restore`) and RPO (age of the newest restored
+   transaction).
+
+PART B — Ops exit gate (prepare docs/PILOT_CHECKLIST.md; humans complete)
+
+Each item has: owner (name), date, evidence link. Claude leaves these
+blank.
+- DR drill: restore-test.sh run against the production EBS snapshot +
+  latest pg_dump by someone who did not write the script; RTO/RPO recorded
+  and within the enterprise's agreed targets.
+- Each runbook executed once by someone other than its author.
+- Staging send reaches inbox on Gmail, Outlook, Yahoo, corporate.
+- DMARC at quarantine or reject (advanced per the 2.2 procedure).
+- Warmup started ≥ 4 weeks (target 4-6) before pilot start.
+- All decision records from the pilot are queryable.
+- Cross-tenant anomaly counter is 0 for the past 30 days.
+- PgBouncer isolation test passes against production config.
+- No open FAIL in SECURITY_REVIEW.md.
+
+Agent acceptance:
+- `make security-check` green; SECURITY_REVIEW.md has no FAIL without a
+  documented compensating control.
+- All runbooks and the checklist exist.
+- Dashboards provision against the local stack.
+
+Commit when the agent acceptance is green. Pilot handover happens only
+when PILOT_CHECKLIST.md is 100% complete with evidence — do not hand over
+with any open FAIL.

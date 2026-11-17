@@ -1,0 +1,93 @@
+Read CLAUDE.md.
+
+Implement Sprint 3.3: executable methodology skills, Agent Studio v1, and
+pgvector semantic search.
+
+Deliverables:
+
+1. Methodology skills as typed, versioned modules in
+   internal/skills/{bant,meddpicc}/:
+   - Each skill has: name, version, required_inputs schema, evaluate
+     function, gaps schema. Pure functions over gathered evidence; any LLM
+     use goes through internal/llm.
+   - BANT: Budget (similar past opps, enrichment firmographics,
+     conversation mentions), Authority (contact title/role + engagement),
+     Need (deal notes + conversation topics), Timeline (stage phase +
+     activity cadence).
+   - MEDDPICC: Metrics, Economic buyer, Decision criteria, Decision
+     process, Paper process, Identify pain, Champion, Competition.
+   - Each evaluates to {score 0-100, gaps: [{field, severity,
+     suggested_action}], evidence_refs}.
+   - Skills are invoked by agents or by Temporal activities — never by the
+     decision gate (the gate stays a deterministic rule engine) and never
+     directly by users. Users see the output on the deal/lead record.
+
+2. Triggers (Temporal activities, consuming events via internal/events):
+   - BANT runs on lead.created, lead.updated, and when an opportunity
+     enters a stage whose phase is 'prospecting' or 'discovery'.
+     (Leads have no stages; do not invent one.)
+   - MEDDPICC runs when an opportunity enters a stage whose PHASE is
+     'discovery', 'proposal' or 'negotiation' (Stage.phase from 1.1 —
+     never match on stage names, which are tenant-defined).
+   - Outputs are derived annotations: ai_annotations rows (kind
+     'methodology_bant' / 'methodology_meddpicc', model_version = skill
+     version). No business columns are written.
+
+3. Agent Studio v1 — admin API + UI (admin role only):
+   - List agents, view their graph (rendered from the LangGraph
+     definition), view their tool access.
+   - Toggle tools on/off per agent.
+   - Approval mode per agent × tool: `auto` (gate rules decide) or
+     `human` (gate always returns needs_human → approval inbox from 3.2).
+     Read tools may be `auto` only.
+   - Per-tenant and per-agent rate limits (consumed by the gate).
+   - Config is versioned (agent_config_versions, append-only); each change
+     audit-logged with before/after and actor; rollback = activate a prior
+     version (single action, itself audit-logged).
+   - The gate and the tool bus read the ACTIVE config version.
+
+4. pgvector:
+   - migrations/000XXX_pgvector.up.sql: CREATE EXTENSION vector (≥ 0.8);
+     embeddings live in side tables, not business tables:
+     `embeddings` (tenant_id, subject_type, subject_id, model, dim,
+     embedding vector(<dim from the configured embedding model, fixed in
+     the migration and recorded in README>), content_hash, created_at),
+     UNIQUE (tenant_id, subject_type, subject_id, model). HNSW index on
+     embedding; btree on (tenant_id, subject_type).
+   - Backfill worker (Python, batches of 100, per tenant per CLAUDE.md):
+     embeds name + description + recent activity summary via
+     agents/llm.py; skips unchanged content_hash. Records llm_usage.
+   - Query surface: GET /api/v1/search/semantic?q= returns top 20 across
+     accounts, contacts, opportunities, through RLS AND authz.Scope.
+     Inside the TenantTx: `SET LOCAL hnsw.iterative_scan = relaxed_order`
+     and `SET LOCAL hnsw.ef_search = <configured>`. Never SET SESSION.
+   - Monitoring: log every semantic query with a filtered-recall proxy
+     (results_count / requested_k, plus an offline exact-search comparison
+     job on a 1% sample) to detect recall collapse under selective filters.
+   - Add HNSW index memory to the CLAUDE.md budget notes.
+
+5. Tests:
+   - BANT on a seeded lead produces an assessment with gaps, stored as an
+     ai_annotation with version.
+   - MEDDPICC fires for a stage whose phase is 'proposal' even when the
+     stage is named "Quote Sent"; does not fire for phase 'prospecting'.
+   - Agent Studio toggle disables a tool; that agent's next run fails at
+     the tool bus with `tool_disabled`.
+   - Approval mode `human` → the gate returns needs_human.
+   - Config rollback restores prior behaviour and writes an audit row.
+   - Semantic search returns relevant results for a tenant with 100
+     accounts (fake embedding provider with deterministic vectors).
+   - Recall test: a highly selective filter (one tenant of ten, one rep's
+     scope) still returns ≥ 90% of exact-search top-20.
+   - A pooled connection never retains hnsw settings after the tx (check
+     SHOW hnsw.iterative_scan on the next tx).
+
+Agent acceptance:
+- `make test` green.
+- Semantic search p95 < 200 ms on the seed-demo dataset (measured, logged).
+- Filtered-recall benchmark documented in README.
+
+Ops exit gate (human): BANT/MEDDPICC outputs reviewed as meaningful on the
+pilot's seed data by a sales lead (docs/ops/methodology-review.md).
+
+Commit when the agent acceptance is green.

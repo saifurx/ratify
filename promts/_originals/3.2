@@ -1,0 +1,71 @@
+Read CLAUDE.md.
+
+Implement Sprint 3.2: the decision gate service and the first three
+agents.
+
+Deliverables:
+
+1. Decision gate service — SEPARATE Go service, `cmd/decisiongate/`.
+   - POST /v1/gate/evaluate: takes (agent_id, tool_name, input, evidence,
+     requested_by) and returns a decision_record_id plus
+     {approved: bool, reasons: []}.
+   - Deterministic rule engine (rules in internal/decisiongate/rules.go):
+     - Permission check: agent_worker role must have the tool's
+       required permission.
+     - Tenant match: input.tenant_id must equal context tenant.
+     - Consent/suppression: for any tool that writes to a contact or
+       sends outreach, consent_status must be 'granted' and the recipient
+       must not be suppressed.
+     - Business rule stubs: margin limits, discount limits, deal-stage
+       gates. Phase 5 fills these in.
+     - Rate limits: per agent, per tenant, per hour.
+   - Optional LLM review: only invoked when rules return 'ambiguous'.
+     Returns a recommendation that the gate converts to a decision.
+   - Decision record: append-only table `decision_records` in its own
+     schema `gate`. Columns: id uuid PK, tenant_id, agent_id, tool_name,
+     input_hash text, rules_evaluated jsonb, rules_outcome jsonb,
+     llm_review jsonb NULL, approved bool, rationale text,
+     approved_by text NULL (human if applicable), created_at.
+     No UPDATE, no DELETE grants for any role.
+
+2. Token issuance: when the gate approves, it returns a short-lived
+   (5 min) signed token scoped to (agent_id, tool_name, input_hash,
+   tenant_id). Write tools in the tool bus verify this token before
+   executing. Expired or mismatched token → 403. This closes the loop:
+   no agent write without a fresh gate approval.
+
+3. First agents (all READ-only except NBA):
+   - Lead Scoring Agent: reads lead + account + activity, recomputes
+     score with the current model version, records a decision record for
+     the recompute (approval is automatic because it is read-only).
+   - Deal Health Agent: reads opportunity + contacts + activities,
+     produces a 0-100 health score + risk factors. Read-only.
+   - Next-Best-Action Agent: produces a recommendation
+     (recommendation_text, action_type, urgency). Does NOT write to the
+     CRM. The rep clicks Accept on the recommendation to trigger the
+     action — which then goes through the decision gate as a write by
+     the rep, not the agent.
+
+4. UI: recommendation cards on the deal detail page. Accept/reject
+   buttons. Accept fires a POST /api/v1/deals/{id}/actions/{action_id}
+   which is a normal rep write, not an agent write. Reject captures a
+   reason (dropdown) and stores it for calibration.
+
+5. Tests:
+   - Gate rejects a write tool with no token.
+   - Gate rejects a write with an expired token.
+   - Gate rejects a write with a token for a different input.
+   - Gate produces an immutable decision record: attempt to UPDATE
+     `gate.decision_records` from any role → permission denied.
+   - An agent attempting a direct CRM write (bypassing the gate) is
+     rejected by the tool bus.
+   - Every NBA recommendation generates a decision record with
+     rationale.
+
+Acceptance criteria:
+- `make test` green including all gate and immutability tests.
+- Every AI recommendation has a queryable decision record.
+- A human override is captured with reason.
+- No write action succeeds without passing the gate.
+
+Commit when green. This is the Phase 3 exit gate.

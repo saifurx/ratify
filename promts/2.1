@@ -1,0 +1,73 @@
+Read CLAUDE.md.
+
+Implement Sprint 2.1: the sequence engine (email, task, call steps).
+Do NOT send real email — Postal is Sprint 2.2. Requires Sprint 2.0
+(Temporal, LLM gateway).
+
+Deliverables:
+
+1. Sequence model: id, tenant_id, name, steps jsonb (array of
+   {type, config, delay_hours}), status, sending_domain_id NULL (wired in
+   2.2). Step types: email, task, call (manual log only). Each email step
+   has template_id. sequence_template: id, tenant_id, subject, body_html,
+   body_text, variables jsonb. Composite FKs per CLAUDE.md.
+
+2. sequence_enrollment: id, tenant_id, sequence_id, contact_id,
+   opportunity_id NULL, status ('active','paused','completed','replied',
+   'bounced','blocked','stopped'), status_reason text, current_step int,
+   next_run_at timestamptz, created_at.
+   Enrolling a contact requires consent.CanContact (Sprint 1.2) — otherwise
+   409 with reason. The check is repeated before EVERY email step.
+
+3. Execution via Temporal (task queue crm-default): one workflow per
+   enrollment, workflow id `enrollment-{id}`. Loop: durable timer until
+   next_run_at → execute step as an Activity → compute next next_run_at →
+   repeat until status != active. Activities call
+   internal/sequence/executor.go which, in one tenant tx, writes an
+   outbox event (topic `ratify.sequence.step`, idempotency key
+   `{enrollment_id}:{step}`) OR logs the task/call for the rep. A step is
+   never enqueued twice for the same key (unique constraint).
+
+4. Rate limits (soft limits — RESCHEDULE): per-tenant (default 50/min),
+   per-recipient-domain (default 20/hour), send-window per tenant
+   (hour range + timezone). Implemented in Redis sliding windows
+   (keys `t:{tenant_id}:...`). Hitting a soft limit reschedules the step to
+   the next allowed time; it never fails the enrollment.
+   (Hard limits — the daily warmup cap — are Sprint 2.2 and BLOCK; see
+   there. Do not conflate the two.)
+
+5. Reply and bounce: the workflow accepts signals `replied` and `bounced`
+   (wired to Postal webhooks in 2.2). Either sets the enrollment status
+   and ends the workflow.
+
+6. Pause/resume/stop: signals; a paused workflow blocks until resumed or
+   stopped.
+
+7. AI draft variants: POST /api/v1/sequences/{id}/steps/{n}/draft returns
+   an LLM-drafted subject + body (via internal/llm) from contact and
+   account context. This is a READ: nothing is persisted unless the USER
+   saves it through the normal step-update endpoint (a human write). The
+   decision gate does not exist yet and is not needed here; in 3.2 the
+   same capability is exposed to agents as a tool.
+
+8. Tests (Temporal time-skipping env — no wall-clock waits):
+   - A 3-step sequence with 1-hour delays completes, with steps at the
+     right virtual times.
+   - Worker restart mid-workflow resumes exactly where it left off; no
+     duplicate outbox event for any step key.
+   - Soft-limit exceeded → step rescheduled, not failed.
+   - Contact whose consent is revoked between steps → enrollment `blocked`,
+     no outbox event.
+   - `replied` signal stops the workflow within 5 seconds.
+   - Enrollment of a do_not_contact contact → 409.
+
+Agent acceptance:
+- `make test` green.
+- A single enrollment can be started, paused, resumed, and completed via
+  the API.
+- No email is sent — `ratify.sequence.step` events exist but nothing
+  consumes them yet.
+- Workflow history is queryable by enrollment id
+  (GET /api/v1/enrollments/{id}/history).
+
+Commit when green.

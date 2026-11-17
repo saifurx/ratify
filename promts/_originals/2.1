@@ -1,0 +1,59 @@
+Read CLAUDE.md.
+
+Implement Sprint 2.1: the sequence engine (email, task, call steps).
+Do NOT send real email yet — Postal is Sprint 2.2.
+
+Deliverables:
+
+1. Sequence model: id, tenant_id, name, steps jsonb (array of
+   {type, config, delay_hours}), status. Step types: email, task, call
+   (manual log only). Each email step has template_id.
+   sequence_template table: id, tenant_id, subject, body_html, body_text,
+   variables jsonb.
+
+2. sequence_enrollment: id, tenant_id, sequence_id, contact_id,
+   opportunity_id NULL, status ('active','paused','completed','replied',
+   'bounced'), current_step int, next_run_at timestamptz, created_at.
+
+3. Execution via Temporal: one Temporal workflow per enrollment.
+   Workflow loop: wait until next_run_at → execute step → compute next
+   next_run_at → repeat until status != active. Every step execution is
+   a Temporal Activity so it is durable across worker restarts.
+   Activities call internal/sequence/executor.go which writes to
+   outbox (topic `ratify.sequence.step`, dispatched to a sender in
+   Sprint 2.2) OR logs the task/call for the rep.
+
+4. Send throttling: per-tenant rate limit (configurable, default 50/min),
+   per-domain rate limit (default 20/hour), send-window enforcement (per
+   tenant config: hour range + timezone). All limits in Redis with
+   sliding windows. A step that hits a limit reschedules rather than
+   fails.
+
+5. Reply and bounce detection: reply on the contact's email (received via
+   a webhook endpoint to be wired in Sprint 2.2) sets enrollment status
+   'replied' and stops the workflow. Same for bounce.
+
+6. Pause/resume: user can pause an enrollment at any time; the workflow
+   blocks on a Temporal signal until resumed or the sequence is stopped.
+
+7. AI draft variants: POST /api/v1/sequences/{id}/steps/{n}/draft returns
+   an LLM-drafted subject + body based on the contact and account context.
+   This goes through the decision gate as a READ action (no CRM write,
+   no send). Stored on the step config only if the user saves it.
+
+8. Tests:
+   - A 3-step sequence with 1-hour delays runs in ~2 hours in test mode
+     (configurable delay divisor for tests).
+   - Worker restart mid-workflow resumes exactly where it left off, no
+     duplicate step execution.
+   - Throttle exceeded → step rescheduled, not failed.
+   - Reply detection stops the workflow within 5 seconds.
+
+Acceptance criteria:
+- `make test` green.
+- A single enrollment can be started, paused, resumed, and completed.
+- No email is actually sent in Sprint 2.1 — the outbox has
+  `ratify.sequence.step` events but no consumer sends them.
+- Temporal workflow history is queryable by enrollment ID.
+
+Commit when green.

@@ -1,0 +1,72 @@
+Read CLAUDE.md.
+
+Implement Sprint 2.2: Postal MTA, deliverability control plane, and
+synchronous suppression on the send path.
+
+WARNING: This is the highest-risk sprint. Deliverability collapse takes
+weeks to recover from. Do not shortcut the warmup or the suppression
+check.
+
+Deliverables:
+
+1. Postal MTA deployed in Compose (image postal:latest or the official
+   build). SPF, DKIM (2048-bit, generated per sending domain), DMARC.
+   Streams separated: transactional.* and outbound.* subdomains. SMTP
+   relay from the sequence sender to Postal. Postal configured as
+   smart host with SES or Postmark as transport failover.
+
+2. sending_domain table: id, tenant_id, domain, dkim_private_key
+   (encrypted at rest), dkim_selector, spf_verified bool,
+   dmarc_policy text, warmup_stage int, warmup_started_at, daily_cap int,
+   created_at. Each tenant can have multiple sending domains; sequence
+   chooses based on config.
+
+3. Synchronous suppression gate on the send path:
+   - Before Postal relays a message, check suppression_list for the
+     recipient email AND domain.
+   - Before send, check the daily cap for the sending domain.
+   - Before send, check the recipient is not on an unsubscribe list
+     (tenant-scoped and global).
+   - All checks are in the same code path — no async, no eventual
+     consistency. A missed check is a hard failure, not a warning.
+
+4. Warmup engine:
+   - Start at 100 messages/day per new domain.
+   - Double every 2-3 days (configurable) up to a ceiling.
+   - Hard block: send attempt exceeding today's cap is REJECTED (not
+     deferred to tomorrow — that would silently break sequences).
+   - Auto-pause: complaint rate > 0.1% over trailing 7 days → domain
+     paused, alert sent, all sequences using it paused.
+   - Auto-pause: bounce rate > 2% over trailing 7 days → same.
+
+5. Feedback loops:
+   - Webhook endpoint /webhooks/postal/bounce, /webhooks/postal/complaint.
+   - Hard bounce → immediate insert into suppression_list (before the
+     next send for that recipient can happen). Test: bounce arrives,
+     immediate send attempt to same email, second send is suppressed.
+   - Complaint → suppression + pause the sending domain + log to a
+     complaint_events table.
+
+6. Reply detection: inbound email webhook from Postal → POST
+   /webhooks/postal/inbound. Matches to an enrollment by contact email,
+   stops the workflow, logs the reply as an Activity.
+
+7. Seed testing: scripts/warmup-check.sh sends a test to seed addresses
+   (Gmail, Outlook, Yahoo, corporate) and reports inbox/spam placement.
+   Run weekly during warmup.
+
+8. Tests:
+   - Suppression check runs synchronously (test: mock Postal, verify
+     no relay call for a suppressed recipient).
+   - Warmup cap enforcement: send 101 messages when cap is 100, the
+     101st is rejected.
+   - Complaint webhook → domain paused, sequence paused.
+   - Bounce webhook → suppression list updated before the next send.
+
+Acceptance criteria:
+- `make test` green.
+- A real send (in staging) reaches the recipient's inbox, not spam.
+- Warmup cap and auto-pause both fire correctly.
+- The 100-email warmup test completes in under 30 minutes.
+
+Commit when green. Phase 2 exit gate requires a live staging send test.

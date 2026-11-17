@@ -1,0 +1,80 @@
+Read CLAUDE.md.
+
+Implement Sprint 3.1: the agent runtime — Temporal-driven graph loop,
+LangGraph graph definitions, typed tool bus. Temporal is already deployed
+(Sprint 2.0); this sprint adds the Python worker and agent task queues.
+
+Execution model (decided — do not change without flagging):
+- LangGraph is used to DEFINE graphs (nodes, edges, state schema).
+- A Temporal workflow (`AgentRunWorkflow`, Python SDK) drives the loop:
+  it asks the graph definition for the next node given the current state,
+  then executes that node as a Temporal Activity, stores the returned state
+  in workflow state, and repeats until END.
+- LangGraph's runtime executor and checkpointer are never used inside
+  workflow code (non-deterministic). Durability comes from Temporal history.
+- Every tool call happens inside an Activity and carries an idempotency key
+  `{run_id}:{node}:{attempt_seq}`; the Go tool bus stores results by key so
+  an Activity retry returns the stored result instead of re-executing.
+
+Deliverables:
+
+1. agents/ Python package:
+   - agents/worker.py — Temporal worker on `agent-default` and
+     `agent-batch` (namespace `ratify`; tests use `ratify-test`).
+   - agents/graphs/ — one LangGraph definition per agent type.
+   - agents/runtime.py — the workflow-driven graph loop described above.
+   - agents/tools.py — tool bus client: every tool is an HTTP call to the
+     Go API at /internal/tools/{name} with a service JWT. LLM calls go only
+     through agents/llm.py (Sprint 2.0).
+
+2. Service identity: agents authenticate with FerrisKey client-credentials
+   (one client per tenant realm, role `agent`). The token carries tenant_id;
+   the Go API derives tenant context from it like any user token. In dev,
+   a signed dev token. The Python runtime has NO database credentials.
+
+3. Tool registry: internal/toolbus/registry.go. Each tool declares: name,
+   input JSON schema, output schema, required permission (e.g.
+   `lead:read`, `deal:read`, `sequence:write`), class `read` | `write`.
+   Initial tools:
+   - read: score_lead, get_deal_context, get_account_context,
+     get_recent_activities, draft_email (returns a draft, persists nothing)
+   - write: save_draft_to_sequence
+   Write tools require a decision-gate token (Sprint 3.2). In this sprint
+   they are registered but always refused with 403 `gate_required`.
+
+4. Least privilege in the DB: requests authenticated as an `agent`
+   principal run on a separate pool connecting as `agent_worker` (through
+   PgBouncer). agent_worker has SELECT only on the tables the read tools
+   need, no INSERT/UPDATE/DELETE on CRM tables, and is subject to RLS like
+   app_user. The tool bus result store (`tool_invocations`: tenant_id,
+   idempotency_key UNIQUE, tool, input_hash, output, created_at) is the only
+   table agent_worker may INSERT into.
+
+5. Agent run orchestration:
+   - POST /api/v1/agents/{agent_name}/runs starts AgentRunWorkflow
+     (workflow id = run_id) with tenant/user headers (internal/temporalx).
+   - GET /api/v1/agents/runs/{id} → status pending|running|completed|
+     failed; on failure include a trace (node, activity, error), never raw
+     prompts containing PII.
+
+6. Budget: add the agents service (CLAUDE.md table); `make budget` passes.
+
+7. Tests:
+   - A multi-step loop (score_lead → get_account_context → END) survives a
+     worker kill mid-run and completes on restart.
+   - No duplicate tool executions after the crash (tool_invocations has one
+     row per idempotency key; the Go handler ran once).
+   - save_draft_to_sequence is refused with 403 gate_required — even in
+     tests, no bypass flag exists.
+   - agent_worker cannot SELECT a table it lacks grants for, and cannot
+     INSERT into accounts.
+   - An agent token for tenant A cannot read tenant B data via any tool.
+   - Determinism: the workflow replays cleanly from recorded history
+     (Temporal replayer test).
+
+Agent acceptance:
+- `make test` green.
+- A read-only agent run completes end-to-end within 30 seconds (fake LLM).
+- No agent path can perform a business mutation.
+
+Commit when green.

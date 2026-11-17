@@ -1,0 +1,51 @@
+Read CLAUDE.md.
+
+Implement Sprint 1.3: the Next.js CRM UI. Backend exists; do not add
+endpoints unless strictly necessary, and if you do, add tests.
+
+Deliverables:
+
+1. web/ Next.js app (App Router, TypeScript, Tailwind, shadcn/ui). Auth
+   via FerrisKey OIDC (NextAuth.js with a custom FerrisKey provider).
+   Session carries tenant_id and roles. Never accept tenant_id from URL
+   or client state.
+
+2. Screens:
+   - Login + logout (FerrisKey)
+   - Dashboard: pipeline value by stage, my open deals, recent activities
+   - Accounts list + detail (with contacts and opportunities tabs)
+   - Contacts list + detail
+   - Opportunities pipeline board (drag-drop stage change → PATCH
+     opportunity, emits opportunity.stage_changed)
+   - Activity composer (note, email, call log — send is deferred to
+     Phase 2; for now, notes and call logs only)
+   - Lead inbox (list of inbound leads, score, source, convert button
+     that requires consent)
+
+3. Role-based rendering:
+   - rep: own accounts, contacts, opportunities only
+   - manager: all within their team
+   - admin: all within tenant + settings (custom fields placeholder)
+
+4. Search: PostgreSQL full-text search across accounts, contacts,
+   opportunities. Single search bar. No Elasticsearch yet.
+
+5. Every mutation goes through the API — no direct DB access from web/.
+   Errors render as toasts with the API's error message, never a generic
+   "Something went wrong".
+
+6. Tests:
+   - Playwright e2e: login → create account → create opportunity →
+     change stage → verify activity timeline updated.
+   - Playwright e2e: login as rep A, verify rep B's account is not
+     visible in list or search.
+   - Vitest unit: form validation, error rendering.
+
+Acceptance criteria:
+- `make test` (Go + Python) still green.
+- `make test-ui` runs Playwright and passes.
+- No client-side tenant_id accepted from outside the JWT.
+- Every screen renders with a realistic seed dataset of 100 accounts,
+  500 contacts, 200 opportunities across 2 tenants.
+
+Commit when green.

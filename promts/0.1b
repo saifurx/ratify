@@ -1,0 +1,34 @@
+Read CLAUDE.md and the current repo.
+
+Audit the Sprint 0.1 foundation against its specification. Do NOT add
+features. For each item below, verify and report PASS/FAIL with file:line
+evidence. Fix only FAILs.
+
+1. set_tenant() uses set_config(..., true) — transaction-scoped, not session.
+2. current_tenant() uses current_setting('app.tenant_id', true) and returns
+   NULL (not an error, not '') when unset.
+3. Every table has ENABLE ROW LEVEL SECURITY and FORCE ROW LEVEL SECURITY.
+4. Every RLS policy uses current_tenant() in both USING and WITH CHECK, so
+   missing context yields zero rows and rejected writes (fail closed).
+5. set_tenant() and current_tenant() are SECURITY INVOKER (not DEFINER).
+6. TenantTx.WithTenant returns ErrNoTenant when tenant.From fails.
+7. AuthMiddleware rejects authenticated users with missing tenant claim
+   with 403, not an implicit global grant.
+8. AssertNotPrivileged rejects superuser, app_migrator, BYPASSRLS roles,
+   and table owners at boot.
+9. Tables are owned by app_migrator; app_user owns nothing (table owners
+   bypass grants and, without FORCE, RLS).
+10. No package outside internal/db imports pgxpool.
+11. Every service in docker-compose.yml has both mem_limit and cpus, every
+    image is pinned, and `make budget` passes.
+12. tests/tenant_isolation_test.go covers all four required subtests and
+    connects as app_user.
+13. deploy/initdb/01-roles.sql grants app_user only SELECT on tenants and
+    SELECT/INSERT/UPDATE/DELETE on accounts (no DDL), and no role has
+    BYPASSRLS.
+14. accounts has UNIQUE (tenant_id, id) so later composite FKs can target it.
+15. No log line emits request bodies, emails, or tokens.
+
+If any FAIL requires a schema change, produce a new migration rather than
+editing 000001. Report at the end: PASS/FAIL table, list of changes made,
+and any items you could not verify.

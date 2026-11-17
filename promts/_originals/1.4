@@ -1,0 +1,51 @@
+Read CLAUDE.md.
+
+Implement Sprint 1.4: hardening, load test, cross-tenant anomaly
+detection, import tool, and restore runbook.
+
+Deliverables:
+
+1. Cross-tenant anomaly detector: middleware that inspects every
+   response from /api/v1/* and asserts that no response body contains an
+   id whose tenant_id differs from the request tenant. Logs
+   `cross_tenant_leak_attempt` to stderr and returns 500 to the client.
+   This is a LAST LINE OF DEFENSE — RLS should prevent the situation.
+   Test: deliberately bypass RLS in a test-only endpoint (behind a build
+   tag) and confirm the detector blocks the response.
+
+2. Load test: k6 script in tests/load/ that simulates
+   - 100 concurrent users browsing accounts and opportunities
+   - 10 leads/sec inbound for 5 minutes
+   - 2 pipeline-stage updates/sec
+   Thresholds: p95 < 500ms, error rate < 0.1%. Run it in CI (nightly,
+   not on every PR). Document baseline numbers in README.
+
+3. Import tool: cmd/import/main.go — takes a CSV of accounts/contacts/
+   opportunities and an existing tenant_id. Requires a lawful_basis
+   column in the contacts CSV. Rejects the whole file if any row lacks
+   lawful_basis. Emits audit events for every imported row. Dry-run mode
+   (`--dry-run`) prints what would change.
+
+4. Restore runbook: docs/RESTORE.md — step-by-step for restoring from
+   (a) EBS snapshot and (b) pg_dump to S3. Include a script
+   `scripts/restore-test.sh` that spins up a scratch postgres in
+   Docker, restores the latest dump, and runs `make test` against it.
+   This script is what the DR drill executes.
+
+5. Observability additions:
+   - Prometheus metrics endpoint /metrics on the API (request count,
+     latency histogram, error count by route, outbox lag,
+     cross_tenant_leak_attempt counter).
+   - Grafana dashboard JSON in deploy/grafana/dashboard.json covering
+     the above.
+
+Acceptance criteria:
+- Cross-tenant detector test passes.
+- Load test passes thresholds on t3.xlarge; numbers documented.
+- Import tool rejects a CSV missing lawful_basis.
+- `scripts/restore-test.sh` restores in under 10 minutes and tests pass
+  against the restored DB.
+- Grafana dashboard renders against a running instance.
+
+Commit when green. This is the Phase 1 exit gate — do not start Phase 2
+until restore-test passes.

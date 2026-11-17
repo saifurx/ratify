@@ -1,0 +1,69 @@
+Read CLAUDE.md.
+
+Implement Sprint 0.2: Apache Kafka (KRaft, single broker) and the
+transactional outbox pattern.
+
+Deliver:
+
+- migrations/000002_outbox.up.sql — `outbox` table:
+  id uuid PK, tenant_id uuid NOT NULL, topic text NOT NULL, key text,
+  payload jsonb NOT NULL, headers jsonb, created_at timestamptz,
+  dispatched_at timestamptz NULL, attempts int DEFAULT 0,
+  last_error text. Index on (dispatched_at, created_at) WHERE dispatched_at
+  IS NULL. ENABLE + FORCE RLS. Policy uses current_tenant(). app_user gets
+  SELECT, INSERT. app_user gets UPDATE only on dispatched_at, attempts,
+  last_error (relay uses these).
+
+- internal/outbox/writer.go — `Append(ctx, tx, topic, key, payload)`
+  inserts into outbox within the caller's transaction. Returns
+  ErrNoTenant if context has no tenant. No direct Kafka call from
+  handlers, ever.
+
+- internal/outbox/relay.go — reads undispatched outbox rows in batches,
+  publishes via Kafka transactional producer, marks dispatched in the
+  same tx that the row was read. Producer is idempotent
+  (enable.idempotence=true, transactional.id per worker instance).
+  On publish failure: increment attempts, record last_error, leave
+  dispatched_at NULL, retry with exponential backoff up to 10 attempts.
+  After 10: log to stderr and stop retrying (ops will investigate).
+
+- cmd/relay/main.go — runs the relay worker. Connect as a dedicated
+  `relay_user` role (new: SELECT on outbox, UPDATE on
+  dispatched_at/attempts/last_error only). Fails closed if it cannot
+  reach Kafka.
+
+- internal/account/repository.go — modify Create to also call
+  outbox.Append(ctx, tx, "ratify.account.created", accountID, payload)
+  in the same transaction as the insert. The event must be published iff
+  the account is committed.
+
+- deploy/docker-compose.yml — add kafka (apache/kafka:4.0.0, KRaft,
+  RF=1, KAFKA_HEAP_OPTS=-Xms512m -Xmx1024m, mem_limit 2g, cpus 1.0,
+  controller+boker role, advertised listener kafka:9092) and relay (new
+  service, mem_limit 512m, cpus 0.25, depends_on kafka healthy and
+  postgres healthy and migrate completed).
+
+- deploy/initdb/01-roles.sql — add relay_user role with the grants above.
+
+- tests/outbox_test.go — three subtests:
+  1. Account creation writes exactly one outbox row in the same tx
+     (rollback test: force a failure after Append, confirm no account
+     AND no outbox row).
+  2. Relay publishes the row to Kafka and marks dispatched_at within
+     2 seconds of commit.
+  3. Relay crash mid-publish (kill the relay process between read and
+     mark-dispatched) does NOT produce a duplicate Kafka message on
+     restart, because the producer is idempotent and the tx is not
+     committed. Verify consumer sees exactly one message.
+
+- Update Makefile: `make test` runs both isolation and outbox tests.
+
+Acceptance criteria:
+- `make test` passes isolation + outbox tests.
+- Consumer reading `ratify.account.created` receives exactly one message
+  per account creation, even after relay restart.
+- No handler calls a Kafka producer directly — grep for `kafka` outside
+  internal/outbox and cmd/relay should find nothing.
+- Kafka heap stays under 1 GB during the test (check `docker stats`).
+
+Commit when green.

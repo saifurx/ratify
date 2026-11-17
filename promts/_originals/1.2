@@ -1,0 +1,68 @@
+Read CLAUDE.md.
+
+Implement Sprint 1.2: inbound lead capture, consent/suppression,
+enrichment, and lead scoring v1.
+
+Deliverables:
+
+1. Lead model: id, tenant_id, email citext, first_name, last_name, company,
+   domain, source text, source_detail jsonb, consent_status text,
+   consent_source text, consent_captured_at timestamptz, lawful_basis text,
+   raw_payload jsonb, score int NULL, score_version text, created_at.
+   RLS + tenant_id + indexes. Never delete rows (soft delete via deleted_at).
+
+2. Consent and suppression:
+   - consent_ledger table (lead_id, status, source, captured_at, ip,
+     user_agent). Append-only.
+   - suppression_list table (email citext, domain text NULL, reason text,
+     added_by text, added_at). Tenant-scoped. Populated by hard bounces,
+     complaints, opt-outs, and manual admin adds.
+   - Ingestion path MUST check suppression synchronously before creating
+     the lead. A suppressed email returns 200 with `{"status":"suppressed"}`
+     — do not reveal WHY to the sender.
+
+3. Hosted form endpoint: POST /api/v1/inbound/leads (public, no auth, but
+   rate-limited by IP and tenant via a tenant_token query param that
+   resolves to a tenant). Capture UTM params, referrer, IP, UA.
+   First-party cookie for session continuity (no third-party tracking).
+
+4. Dedupe: match on email (citext) within the tenant, then on
+   (domain, lower(first_name+last_name)) as a fallback. Merge rather than
+   duplicate. Merges must preserve the first_captured_at and union the
+   consent ledger.
+
+5. Enrichment (v1): a Python worker that takes a domain and returns
+   firmographics from a native public crawler. Do NOT call third-party
+   enrichment APIs. Crawl robots.txt first, respect it, rate-limit per
+   host, cache responses in Redis for 7 days. Store raw HTML hash + parsed
+   fields in an `enrichment_raw` table for provenance.
+
+6. Lead scoring v1 (Python): XGBoost classifier trained on the pilot's
+   seed data OR on a documented synthetic dataset if no history exists.
+   Features: source, company size (from enrichment), domain age, email
+   domain type, whether the lead exists in an existing opportunity.
+   Output: score int 0-100, plus a reasons array (SHAP-lite). Model
+   versioned; scores stored with score_version so they are reproducible.
+   Endpoint POST /api/v1/internal/score-batch called by the lead worker.
+
+7. Lead-to-opportunity conversion: POST /api/v1/leads/{id}/convert
+   requires consent_status='granted'. Creates an Account, Contact,
+   Opportunity in one transaction. Emits lead.converted.
+
+8. Tests:
+   - Suppressed email → no lead created, no PII stored.
+   - Duplicate email → merged, ledger union, one lead row.
+   - Score is deterministic given the same features + model version.
+   - Conversion without consent → 403.
+   - Cross-tenant: a lead created via tenant A's token is invisible to
+     tenant B.
+
+Acceptance criteria:
+- `make test` green.
+- A form POST with valid data creates a lead, enriches it, scores it, and
+  emits lead.created + lead.scored, all within 5 seconds.
+- Suppression check happens BEFORE any DB write.
+- Enrichment crawler respects robots.txt (add a test that fails if
+  robots disallow is ignored).
+
+Commit when green.

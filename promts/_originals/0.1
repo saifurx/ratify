@@ -1,0 +1,52 @@
+Read CLAUDE.md.
+
+Scaffold Sprint 0.1 of Ratify: tenant isolation, auth, migrations, and the
+RLS isolation gate test. Deliver exactly these files:
+
+- go.mod (module `ratify`)
+- cmd/api/main.go — HTTP server with /healthz, /api/whoami, /api/accounts
+  (GET list, POST create). Refuses to boot if AssertNotPrivileged fails.
+- internal/platform/config.go — env config
+- internal/platform/auth.go — OIDC verifier via go-oidc. Dev mode when
+  OIDC_ISSUER is empty AND ENV != production; dev mode trusts X-Tenant-Id
+  and X-User-Id headers. Production without OIDC_ISSUER is a boot error.
+  Missing/invalid tenant claim → 403, not "see all".
+- internal/platform/httpx.go — JSON helpers, AssertNotPrivileged,
+  RequestLogger
+- internal/tenant/context.go — With/From
+- internal/db/tx.go — TenantTx.WithTenant, the ONLY path to the DB.
+  Uses set_tenant($1) which wraps set_config(..., true). Missing context
+  returns ErrNoTenant.
+- internal/account/repository.go — List has NO tenant predicate (RLS
+  supplies it). Create uses current_tenant() for tenant_id, never client
+  input.
+- internal/account/handler.go
+- migrations/000001_init.up.sql — set_tenant(), current_tenant(), tenants
+  table, accounts table, ENABLE + FORCE RLS on both, accounts_isolation
+  policy (USING + WITH CHECK), indexes on (tenant_id, created_at) and
+  (tenant_id, lower(domain)).
+- migrations/000001_init.down.sql
+- deploy/initdb/01-roles.sql — app_user, app_migrator, ferriskey_user
+  roles; ferriskey database; schema grants. Dev passwords only.
+- deploy/Dockerfile.api — multi-stage, distroless
+- deploy/.env.example
+- deploy/docker-compose.yml — postgres, redis, migrate, api. Every service
+  has mem_limit and cpus. FerrisKey is profile-gated `oidc`.
+- tests/tenant_isolation_test.go — four subtests: sees only own rows,
+  no tenant context fails closed, raw query outside wrapper sees nothing,
+  cannot insert into another tenant.
+- Makefile — init, up, down, migrate, test, psql, seed, clean
+- README.md — run instructions, the OIDC enable steps, the note that
+  set_tenant MUST use transaction scope.
+
+Acceptance criteria:
+- `make up && make test` passes all four isolation subtests
+- `make seed` prints a TENANT_ID
+- POST /api/accounts with X-Tenant-Id=<tenant> succeeds, then GET with a
+  DIFFERENT tenant id returns empty items
+- No handler imports pgxpool directly — grep for `pgxpool` should only hit
+  internal/db and internal/platform/httpx.go
+- AssertNotPrivileged rejects superuser and app_migrator on startup
+
+Do not implement Kafka, FerrisKey default-on, Next.js, agents, or the
+decision gate yet. Those are later sprints. Commit when tests pass.

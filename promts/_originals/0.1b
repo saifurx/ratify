@@ -1,0 +1,23 @@
+Read CLAUDE.md and the current repo.
+
+Audit the Sprint 0.1 foundation against its specification. Do NOT add
+features. For each item below, verify and report PASS/FAIL with file:line
+evidence. Fix only FAILs.
+
+1. set_tenant() uses set_config(..., true) — transaction-scoped, not session.
+2. Every table has ENABLE ROW LEVEL SECURITY and FORCE ROW LEVEL SECURITY.
+3. Every RLS policy uses current_tenant() which returns NULL when unset,
+   so missing context yields zero rows (fail closed).
+4. TenantTx.WithTenant returns ErrNoTenant when tenant.From fails.
+5. AuthMiddleware rejects authenticated users with missing tenant claim
+   with 403, not an implicit global grant.
+6. AssertNotPrivileged rejects superuser and app_migrator at boot.
+7. No handler imports pgxpool directly.
+8. Every service in docker-compose.yml has both mem_limit and cpus.
+9. tests/tenant_isolation_test.go covers all four required subtests.
+10. deploy/initdb/01-roles.sql grants app_user only SELECT on tenants and
+    SELECT/INSERT/UPDATE/DELETE on accounts (no DDL).
+
+If any FAIL requires a schema change, produce a new migration rather than
+editing 000001. Report at the end: PASS/FAIL table, list of changes made,
+and any items you could not verify.

@@ -1,0 +1,67 @@
+Read CLAUDE.md.
+
+Implement Sprint 3.3: executable methodology skills and Agent Studio v1.
+
+Deliverables:
+
+1. Methodology skills as typed, versioned modules in
+   internal/skills/{bant,meddpicc}/:
+   - Each skill has: name, version, required_inputs schema, evaluate
+     function, gaps schema.
+   - BANT: Budget (evidence sources: past opps with similar account,
+     enrichment firmographic, conversation mentions), Authority
+     (contact role + engagement), Need (deal notes + conversation topics),
+     Timeline (stage + activity cadence).
+   - MEDDPICC: Metrics, Economic buyer, Decision criteria,
+     Decision process, Paper process, Identify pain, Champion, Competition.
+   - Each evaluates to {score 0-100, gaps: [{field, severity, suggested
+     action}]}.
+   - Skills are invoked by the decision gate or by agents, never by
+     users directly. Users see the output as an enrichment on the deal
+     record.
+
+2. Skills run as Temporal activities. Invoked automatically:
+   - BANT runs on lead stage changes.
+   - MEDDPICC runs on opportunity stage transitions to Discovery,
+     Proposal, Negotiation.
+   - Outputs are stored on the deal (methodology_assessment jsonb).
+
+3. Agent Studio v1 — configuration UI + admin API:
+   - List agents, view their graphs, view their tool access.
+   - Toggle individual tools on/off per agent.
+   - Configure required approval (auto-approved, human-approved) per
+     agent × tool combination.
+   - Configure per-tenant rate limits.
+   - Changes are audit-logged with before/after and actor.
+   - Config is versioned; rolling back is a single action.
+
+4. pgvector enablement:
+   - migrations/000XXX_pgvector.up.sql: CREATE EXTENSION vector;
+     add embedding vector(1536) columns to accounts, contacts,
+     opportunities, activities (nullable until backfilled).
+   - Backfill worker: Python, batches of 100, embeds name + description
+     + recent activity summary. Stores in the same row.
+   - Set HNSW parameters: iterative_scan = relaxed_order (pgvector 0.8+
+     requirement for tenant-scoped filters).
+   - Query surface: GET /api/v1/search/semantic?q= returns top 20 across
+     accounts, contacts, opportunities, filtered by RLS.
+   - Monitoring: log every semantic query with filtered_recall proxy
+     (results_count / expected_if_no_filter — an approximation, but
+     enough to detect recall collapse under selective filters).
+
+5. Tests:
+   - BANT invoked on stage change produces an assessment with gaps.
+   - Agent Studio toggle disables a tool for an agent; that agent's
+     subsequent run fails at the tool bus with a clear error.
+   - Semantic search returns relevant results for a tenant with 100
+     accounts.
+   - pgvector iterative scans: a highly selective filter (one tenant,
+     one stage) still returns relevant results (recall test).
+
+Acceptance criteria:
+- `make test` green.
+- BANT and MEDDPICC produce meaningful outputs on the pilot's seed data.
+- Semantic search latency p95 < 200ms.
+- pgvector filtered recall benchmark documented in README.
+
+Commit when green.

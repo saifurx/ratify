@@ -1,0 +1,68 @@
+Read CLAUDE.md.
+
+Implement Sprint 5.2: hardening, DR drill, and handover runbooks.
+
+Deliverables:
+
+1. Security review pass:
+   - Full RLS policy audit — every table has ENABLE + FORCE, every
+     policy uses current_tenant(), no table grants bypass RLS.
+   - Tenant-context propagation audit — no handler calls pgxpool
+     directly, no query bypasses TenantTx.
+   - FerrisKey admin credentials rotated from default, 2FA enabled for
+     admin, session timeout configured.
+   - Secret rotation procedure documented: database passwords, DKIM
+     keys, JWT signing keys, LLM API keys, FerrisKey admin.
+   - Dependency scan: run `govulncheck` and `pip-audit`, fix any HIGH
+     or CRITICAL, document the rest.
+
+2. DR drill: execute `scripts/restore-test.sh` against the production
+   EBS snapshot + latest pg_dump. Measure RTO and RPO. Document both.
+   The drill must be executed by someone who did not write the script,
+   to prove the runbook is real.
+
+3. Runbooks in docs/:
+   - DEPLOY.md — how to deploy a new version (migrations before app
+     container, per CLAUDE.md)
+   - ROLLBACK.md — how to roll back a bad deploy (migration down, app
+     revert, decision to keep or revert data)
+   - RESTORE.md — from EBS snapshot, from pg_dump, from both
+   - ONBOARD.md — how to add a new tenant (create tenant, provision
+     sending domain, start warmup, provision FerrisKey realm, run
+     import)
+   - INCIDENT.md — what to do for: cross-tenant alert, deliverability
+     drop, agent runaway loop, Kafka down, Temporal down, decision
+     gate down, LLM provider down
+   - ESCALATION.md — exit-path triggers: when to split Postgres to RDS,
+     when to move to multi-instance, when to escalate pgvector to
+     Qdrant, when to shard by tenant
+
+4. Observability dashboards finalized:
+   - Decision record volume by agent and by approval status.
+   - Agent recommendation acceptance/override rates.
+   - Deliverability: bounce, complaint, send volume vs cap, per domain.
+   - Cross-tenant anomaly counter (should always be 0).
+   - LLM cost per tenant per day.
+   - Forecast MAPE trend.
+
+5. Post-launch checklist in docs/PILOT_CHECKLIST.md:
+   - Staging send reaches inbox on Gmail, Outlook, Yahoo, corporate.
+   - DMARC policy is at quarantine or reject, not none.
+   - Warmup started at least 4 weeks before pilot start.
+   - DR drill passed within the enterprise's agreed RTO.
+   - All decision records from the pilot are queryable.
+   - Cross-tenant anomaly counter is 0 for the past 30 days.
+   - PgBouncer / transaction pooler connection test passes (set_tenant
+     transaction scope verified by connecting through the pooler).
+   - Every runbook has been executed once by someone other than its
+     author.
+
+Acceptance criteria:
+- Security review report in docs/SECURITY_REVIEW.md with PASS/FAIL per
+  item.
+- DR drill completed, RTO/RPO documented.
+- All runbooks exist and have been executed once.
+- Pilot checklist is 100% checked before handover.
+
+Commit when green. This is the pilot handover gate. Do not hand over with
+any open FAIL in the security review.

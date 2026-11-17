@@ -1,0 +1,63 @@
+Read CLAUDE.md.
+
+Implement Sprint 5.1: native CPQ and proposals.
+
+Deliverables:
+
+1. Pricing model:
+   - price_book: id, tenant_id, name, currency, active.
+   - price_book_entry: id, price_book_id, product_id, unit_price_cents,
+     min_qty, max_qty, discount_floor_pct, discount_ceiling_pct.
+   - product: id, tenant_id, name, sku, description, tax_code.
+
+2. Quote model: id, tenant_id, opportunity_id, status (draft,
+   pending_approval, approved, sent, accepted, rejected, expired),
+   currency, subtotal_cents, discount_cents, total_cents, expires_at,
+   notes.
+   quote_line: id, quote_id, product_id, qty, unit_price_cents,
+   discount_pct, line_total_cents.
+
+3. Rules engine (configurable, not hardcoded):
+   - Max discount pct per product.
+   - Max total discount pct per quote.
+   - Approval required if discount > X% or margin < Y%.
+   - Required approvers by role (sales_manager, finance, legal) based
+     on the breach.
+
+4. Approval flow (Temporal):
+   - Quote submitted → rules evaluated → if approval needed, a Temporal
+     workflow spawns and waits for signals (approved/rejected with
+     comment) from the required roles.
+   - Timeout: escalate to admin after 48 hours.
+
+5. AI pricing recommendation (goes through the decision gate):
+   - Given opportunity + account + historical wins, recommend a price
+     band. The recommendation is a READ — the rep applies it manually.
+   - If the rep chooses to apply, the resulting quote submission is a
+     WRITE that goes through the gate as a rep action.
+
+6. Proposal generation:
+   - Template with merge fields from opportunity, account, contacts,
+     quote lines.
+   - PDF via headless Chromium or a Go PDF library.
+   - Stored in S3, linked to the quote. Audit trail includes who
+     generated and when.
+
+7. E-sign: sign request generates a signature link. Accept signature
+   uploads (PDF) or a native signature capture (canvas + hash). Record
+   IP, timestamp, hash of the signed document.
+
+8. Tests:
+   - A quote above the discount ceiling triggers approval routing to the
+     correct role.
+   - Approval signals from the correct role transition the quote.
+   - A quote below the ceiling with margin > threshold skips approval.
+   - Signed proposal generates a hash and stores it.
+   - AI pricing recommendation produces a decision record.
+
+Acceptance criteria:
+- `make test` green.
+- A full quote-to-signature flow completes on staging.
+- Every quote and proposal has an audit trail.
+
+Commit when green.

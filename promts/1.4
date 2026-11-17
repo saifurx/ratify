@@ -1,0 +1,81 @@
+Read CLAUDE.md.
+
+Implement Sprint 1.4: PgBouncer, backups, hardening, load test,
+cross-tenant anomaly detection, import tool, and restore runbook.
+
+Deliverables:
+
+1. PgBouncer (transaction pooling) in Compose; api, relay, pyworker and
+   web-facing services connect through it. Migrations connect directly.
+   Test: run the full isolation suite through PgBouncer with pool_size=2
+   and 20 concurrent goroutines alternating tenants — no request ever sees
+   another tenant's rows (proves set_tenant is transaction-scoped).
+
+2. Backups:
+   - scripts/backup.sh — nightly pg_dump (custom format) → S3, server-side
+     encrypted, 30-day lifecycle. Runs from a Compose `backup` one-shot
+     service triggered by host cron or a systemd timer (documented).
+   - deploy/aws/dlm-policy.json — EBS snapshot policy: 7 daily, 4 weekly.
+   - Backup failures increment a Prometheus counter and log loudly.
+
+3. Cross-tenant anomaly detector: middleware on /api/v1/* responses.
+   Every response DTO that represents a tenant-owned record MUST include
+   a `tenant_id` field (enforce with a shared Go type embedded in DTOs and
+   a test that walks all registered DTOs). The middleware decodes the
+   JSON, collects every `tenant_id` value, and if any differs from the
+   request tenant it logs `cross_tenant_leak_attempt`, increments a
+   counter, and returns 500. No DB lookups in the middleware.
+   This is a LAST LINE OF DEFENSE — RLS should prevent the situation.
+   Test: a test-only endpoint (behind build tag `leaktest`) that returns
+   a DTO with another tenant's id; confirm the detector blocks it.
+
+4. Load test: k6 script in tests/load/ that simulates
+   - 100 concurrent users browsing accounts and opportunities
+   - 10 leads/sec inbound for 5 minutes (enrichment cache pre-warmed for
+     the test domains so the crawler is not the bottleneck)
+   - 2 pipeline-stage updates/sec
+   Thresholds: p95 < 500ms, error rate < 0.1%. Provide
+   `.github/workflows/nightly-load.yml` that runs it against the staging
+   host (host and credentials from repository secrets). Document how to
+   run it manually.
+
+5. Import tool: cmd/import/main.go — takes a CSV of accounts/contacts/
+   opportunities and an existing tenant_id. Connects as app_user through
+   TenantTx (never as app_migrator). Requires a lawful_basis column in
+   the contacts CSV with an allowed value; rejects the WHOLE file if any
+   row lacks it. Writes a consent_ledger row per contact. Emits
+   `import.row_imported` outbox events (audit) for every imported row.
+   `--dry-run` prints what would change and writes nothing.
+
+6. Restore runbook: docs/RESTORE.md — step-by-step for restoring from
+   (a) EBS snapshot and (b) pg_dump in S3, including Kafka/Redis/Temporal
+   expectations (outbox is the source of truth; Redis is cache-only).
+   scripts/restore-test.sh spins up a scratch postgres in Docker,
+   restores the latest dump, runs migrations check, and runs
+   `make test-restore` (a read-only verification suite: row counts per
+   table, RLS enabled+forced on every table, isolation test using two
+   sampled tenants) — NOT the full `make test`, which mutates data.
+
+7. Observability:
+   - /metrics on the API: request count, latency histogram, error count by
+     route, outbox lag (oldest undispatched age), dead-letter count,
+     cross_tenant_leak_attempt counter, backup success timestamp.
+   - Prometheus + Grafana in Compose (budget per CLAUDE.md).
+   - deploy/grafana/dashboard.json covering the above.
+
+Agent acceptance:
+- PgBouncer isolation test passes.
+- Cross-tenant detector test passes; DTO tenant_id coverage test passes.
+- Import tool rejects a CSV missing lawful_basis; dry-run writes nothing.
+- scripts/restore-test.sh restores a locally produced dump and passes
+  `make test-restore` in under 10 minutes.
+- Grafana provisions the dashboard against the local stack.
+- `make budget` passes.
+
+Ops exit gate (human — prepare docs/ops/phase1-exit.md, do not claim done):
+- Load test passes thresholds on the production-class instance; numbers
+  recorded in README.
+- First real backup lands in S3 and a restore from it passes.
+
+Commit when the agent acceptance is green. This is the Phase 1 exit gate —
+do not start Phase 2 until restore-test passes.

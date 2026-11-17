@@ -1,0 +1,104 @@
+Read CLAUDE.md.
+
+Implement Sprint 0.2: Apache Kafka (KRaft, single broker) and the
+transactional outbox pattern.
+
+Delivery semantics (read first): a Postgres transaction and a Kafka
+transaction cannot commit atomically. The relay therefore gives
+AT-LEAST-ONCE publication. Exactly-once is achieved at the CONSUMER by
+deduplicating on `event_id` (= outbox.id), which every message carries in
+its headers. Do not claim exactly-once publication anywhere.
+
+Deliver:
+
+- migrations/000002_outbox.up.sql — `outbox` table:
+  id uuid PK, tenant_id uuid NOT NULL, topic text NOT NULL, key text,
+  payload jsonb NOT NULL, headers jsonb, created_at timestamptz DEFAULT
+  now(), dispatched_at timestamptz NULL, attempts int DEFAULT 0,
+  last_error text, dead_lettered_at timestamptz NULL.
+  Partial index on (created_at) WHERE dispatched_at IS NULL AND
+  dead_lettered_at IS NULL. ENABLE + FORCE RLS.
+  Policies:
+  - `outbox_tenant` (USING + WITH CHECK current_tenant()) for app_user.
+  - `outbox_relay` `TO relay_user USING (true)` — relay must read across
+    tenants (see CLAUDE.md "Cross-tenant system roles"). This is the ONLY
+    cross-tenant policy in this sprint.
+  Grants: app_user gets INSERT only (plus SELECT for tests). relay_user gets
+  SELECT, and UPDATE only on (dispatched_at, attempts, last_error,
+  dead_lettered_at). No other role can UPDATE or DELETE.
+
+- internal/outbox/writer.go — `Append(ctx, tx, topic, key, payload)`
+  inserts into outbox within the caller's transaction. Returns
+  ErrNoTenant if context has no tenant. Sets headers: event_id, tenant_id,
+  event_type, occurred_at. No direct Kafka call from handlers, ever.
+
+- internal/outbox/relay.go —
+  - Reads undispatched, non-dead-lettered rows in batches with
+    `SELECT ... FOR UPDATE SKIP LOCKED ORDER BY created_at`.
+  - Publishes via a Kafka transactional, idempotent producer
+    (enable.idempotence=true, transactional.id stable per worker instance so
+    a restarted relay fences and aborts its predecessor's open Kafka tx).
+  - Commits the Kafka tx, then marks dispatched_at in the same Postgres tx
+    that locked the rows, then commits Postgres.
+  - On publish failure: increment attempts, record last_error, leave
+    dispatched_at NULL, retry with exponential backoff. At attempts = 10:
+    set dead_lettered_at, log `outbox_dead_letter` to stderr, and stop
+    selecting the row. A dead-lettered row must not block later rows with a
+    different key.
+  - Ordering: rows with the same key are published in created_at order; if
+    one is pending retry, later rows with the same key wait.
+
+- cmd/relay/main.go — runs the relay worker as `relay_user`. Fails closed
+  (exits non-zero) if it cannot reach Kafka or Postgres at startup.
+
+- internal/events/consumer.go — small reusable consumer helper:
+  isolation.level=read_committed, dedupes on event_id using a
+  `processed_events (consumer, event_id)` table with a primary key
+  (insert-on-conflict-do-nothing inside the handler's tx).
+
+- internal/account/repository.go — modify Create to also call
+  outbox.Append(ctx, tx, "ratify.account.created", accountID, payload)
+  in the same transaction as the insert. The event must be enqueued iff
+  the account is committed.
+
+- deploy/docker-compose.yml — add kafka (apache/kafka:4.0.0 pinned, KRaft,
+  RF=1, KAFKA_HEAP_OPTS=-Xms512m -Xmx1024m, mem_limit 2g, cpus 1.0,
+  process.roles=broker,controller, advertised listener kafka:9092,
+  healthcheck) and relay (mem_limit 256m, cpus 0.25, depends_on kafka
+  healthy, postgres healthy, migrate completed_successfully). Update the
+  CLAUDE.md budget table if values differ; `make budget` must pass.
+
+- deploy/initdb/01-roles.sql — add relay_user role (LOGIN, no BYPASSRLS)
+  with the grants above.
+
+- tests/outbox_test.go — five subtests:
+  1. Account creation writes exactly one outbox row in the same tx
+     (rollback test: force a failure after Append, confirm no account
+     AND no outbox row).
+  2. Relay publishes the row to Kafka and marks dispatched_at within
+     2 seconds of commit; the message carries event_id and tenant_id
+     headers.
+  3. Crash between Kafka send and Kafka commit: kill the relay; on restart
+     the new instance fences the old transactional.id, the aborted message
+     is invisible to a read_committed consumer, and the row is republished
+     once.
+  4. Crash after Kafka commit but before Postgres commit: the row is
+     republished on restart (a duplicate on the topic is EXPECTED), and a
+     consumer built on internal/events processes it exactly once.
+  5. A row that fails 10 times is dead-lettered and a later row with a
+     different key is still published.
+
+- Update Makefile: `make test` runs isolation and outbox tests.
+
+Agent acceptance:
+- `make test` passes isolation + outbox tests.
+- A deduping consumer of `ratify.account.created` processes exactly one
+  event per account creation, even across relay restarts.
+- No Go package outside internal/outbox, internal/events and cmd/relay
+  imports a Kafka client library (grep on import paths, not the word
+  "kafka").
+- relay_user cannot read any table other than outbox (test).
+- Kafka heap stays under 1 GB during the test (`docker stats` snapshot
+  recorded in the test output).
+
+Commit when green.

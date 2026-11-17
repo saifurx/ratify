@@ -1,0 +1,99 @@
+Read CLAUDE.md.
+
+Implement Sprint 5.1: native CPQ and proposals.
+
+Deliverables:
+
+1. Pricing model (all tables tenant-owned, RLS + FORCE, composite FKs):
+   - product: id, tenant_id, name, sku (UNIQUE per tenant), description,
+     tax_code, unit_cost_cents (required for margin rules; visible to
+     admin/finance only).
+   - price_book: id, tenant_id, name, currency, active.
+   - price_book_entry: id, tenant_id, price_book_id, product_id,
+     unit_price_cents, min_qty, max_qty, discount_floor_pct,
+     discount_ceiling_pct.
+
+2. Quote model: quote: id, tenant_id, opportunity_id, price_book_id,
+   status (draft, pending_approval, approved, sent, accepted, rejected,
+   expired), currency, subtotal_cents, discount_cents, tax_cents,
+   total_cents, margin_pct, expires_at, notes, version int.
+   quote_line: id, tenant_id, quote_id, product_id, qty, unit_price_cents,
+   unit_cost_cents (snapshotted), discount_pct, line_total_cents.
+   Tax: a `TaxCalculator` interface with a flat-rate-by-tax_code
+   implementation from a tenant table; document that a real tax engine is
+   a follow-up.
+
+3. Rules engine (configurable data, not code, in quote_rules):
+   - Max discount pct per product (from price_book_entry ceiling).
+   - Max total discount pct per quote.
+   - Approval required if discount > X% or margin < Y%
+     (margin = (net revenue − Σ qty × unit_cost) / net revenue).
+   - Required approver roles per breach: `manager` (CLAUDE.md role
+     vocabulary — the sales manager), `finance`, `legal`.
+   - Implemented once in internal/cpq/rules and ALSO registered as the
+     decision gate's BusinessRule implementation for margin/discount
+     (3.2 hook) — one implementation, two callers.
+
+4. Approval flow (Temporal):
+   - Submit → rules evaluated → if approval needed, a workflow waits for
+     `approved`/`rejected` signals (with comment) from users holding each
+     required role (the API verifies the signer's role before signalling).
+   - Timeout: escalate to admin after 48 hours (notification + admin can
+     sign for any role, recorded as escalated).
+   - Any edit to a pending quote creates a new version and restarts
+     approval.
+
+5. AI pricing recommendation:
+   - Given opportunity + account + historical wins, an agent recommends a
+     price band (read; stored as an ai_annotation with a decision record
+     for display, per 3.2).
+   - Applying it is done by the REP editing the quote (a normal human
+     write). Submission records a decision record linking the
+     recommendation if one was shown (same pattern as NBA Accept in 3.2).
+   - An agent may never create, edit or submit a quote.
+
+6. Proposal generation:
+   - Template with merge fields from opportunity, account, contacts,
+     quote lines.
+   - PDF via headless Chromium in a separate `pdf` service (budget per
+     CLAUDE.md), no network access from the renderer.
+   - Stored in S3 (SSE-KMS), linked to the quote version; SHA-256 stored;
+     audit row (who, when, quote version).
+
+7. E-sign:
+   - Signature link (signed, single-use, expiring token) emailed through the
+     transactional stream.
+   - Signer flow: explicit consent to sign electronically; identity check
+     by email OTP; native signature capture (canvas) or uploaded signed PDF.
+   - Record IP, UA, timestamps, OTP verification, document SHA-256 before
+     and after; produce a tamper-evident audit certificate PDF appended to
+     the signed document.
+   - docs/ESIGN.md: legal-validity notes per target jurisdiction (e.g. US
+     ESIGN/UETA, EU eIDAS simple e-signature, India IT Act — note that
+     Indian law recognises only specified e-signature methods for some
+     documents) and when to use an external provider instead.
+     Flag to the user if the pilot's documents need a qualified signature.
+
+8. Tests:
+   - A quote above the discount ceiling routes approval to the correct
+     role(s).
+   - Margin below threshold requires finance even when discount is fine.
+   - A signal from a user without the required role is rejected.
+   - Approval signals from correct roles transition the quote.
+   - A quote within limits skips approval.
+   - 48h timeout escalates (time-skipping env).
+   - Signed proposal: document hash stored, certificate generated, a
+     modified PDF fails verification.
+   - AI pricing recommendation produces a decision record; an agent call to
+     create a quote is refused by the tool bus.
+   - Cross-tenant: quote_line cannot reference another tenant's product
+     (composite FK).
+
+Agent acceptance:
+- `make test` green; `make budget` passes.
+- Every quote and proposal has an audit trail.
+
+Ops exit gate (human — docs/ops/phase5-cpq.md): a full quote-to-signature
+flow completes on staging with real email delivery.
+
+Commit when the agent acceptance is green.

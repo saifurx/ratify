@@ -1,0 +1,54 @@
+Read CLAUDE.md.
+
+Implement Sprint 3.1: the agent runtime. Temporal outer workflow,
+LangGraph inner cognitive graph, typed tool bus.
+
+Deliverables:
+
+1. Temporal: deploy a single-node Temporal server in Compose (or use
+   Temporal Cloud — document the choice in CLAUDE.md addendum). Create
+   namespaces: `ratify` (default) and `ratify-test`. Task queues:
+   `agent-default`, `agent-batch`.
+
+2. agents/ Python package:
+   - Temporal worker (`agents/worker.py`) connects to `agent-default`.
+   - LangGraph graph definitions in `agents/graphs/` — one per agent type.
+   - Every graph node executes as a Temporal Activity. No node calls a
+     tool directly outside an Activity. Durability comes from Temporal;
+     do not add a LangGraph checkpointer.
+   - Tool bus client in `agents/tools.py`: each tool is an HTTP call to
+     the Go API with a service JWT. Tools: score_lead, get_deal_context,
+     get_account_context, draft_email, get_recent_activities.
+
+3. Tool registration: `internal/toolbus/registry.go` in the Go side.
+   Each tool declares: name, input schema (JSON), required permission
+   (e.g., `lead:read`, `deal:read`), read vs write. Write tools are
+   refused if called without a decision-gate token — Sprint 3.2 will
+   issue those tokens; for now, write tools are disabled entirely.
+
+4. Agent service accounts: `agent_worker` database role, SELECT only on
+   the tables each tool needs. The agent runtime connects as
+   `agent_worker`, never `app_user`.
+
+5. Agent run orchestration:
+   - POST /api/v1/agents/{agent_name}/runs starts a Temporal workflow.
+   - Returns a run_id. Client polls GET /api/v1/agents/runs/{id}.
+   - Status: pending, running, completed, failed. On failure, include
+     the trace.
+
+6. Tests:
+   - A multi-step tool loop (score_lead → get_account_context →
+     complete) survives a worker crash mid-run and completes on restart.
+   - No duplicate tool invocations after crash.
+   - A write tool (draft_email saved to sequence) is refused when called
+     without a decision-gate token — even in a test.
+   - Tool calls respect permissions: agent_worker cannot SELECT from a
+     table it lacks grants for.
+
+Acceptance criteria:
+- `make test` green.
+- A read-only agent run completes end-to-end within 30 seconds.
+- Worker crash test passes.
+- No agent can write to CRM tables.
+
+Commit when green.

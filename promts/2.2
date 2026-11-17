@@ -1,0 +1,119 @@
+Read CLAUDE.md.
+
+Implement Sprint 2.2: Postal MTA, the sender, deliverability control
+plane, and the synchronous send gate.
+
+WARNING: This is the highest-risk sprint. Deliverability collapse takes
+weeks to recover from. Do not shortcut the warmup, the suppression check,
+or unsubscribe handling.
+
+Infrastructure prerequisites (document in docs/ops/email-infra.md; these
+are human tasks, prepare them, do not claim them done):
+- Request removal of the EC2 port-25 outbound restriction from AWS.
+- Elastic IP with reverse DNS (PTR) matching the Postal HELO hostname.
+- DNS per sending domain: SPF, DKIM, DMARC (starting p=none), MX for the
+  reply/return-path subdomain, and the Postal tracking/return-path records.
+- Register sending domains with Google Postmaster Tools and Microsoft SNDS.
+
+Deliverables:
+
+1. Postal in Compose: `ghcr.io/postalserver/postal:<pinned version>` with
+   its own MariaDB (pinned). Budget per CLAUDE.md. DKIM 2048-bit generated
+   per sending domain. Separate streams/subdomains: transactional.* and
+   outbound.*. No external smart-host failover: a second provider has
+   separate IP reputation and would bypass warmup. If Postal is down,
+   sends fail closed and sequences reschedule (see item 3).
+
+2. sending_domain: id, tenant_id, domain, dkim_private_key (encrypted via
+   internal/secrets), dkim_selector, spf_verified bool, dkim_verified bool,
+   dmarc_policy text CHECK IN ('none','quarantine','reject'),
+   warmup_stage int, warmup_started_at, daily_cap int, status
+   ('warming','active','paused'), paused_reason, created_at. A tenant may
+   have several; each sequence selects one.
+   DMARC progression is tracked here: admin endpoint to advance policy,
+   allowed only after 14 days with complaint and bounce rates under
+   threshold; the change is audit-logged.
+
+3. cmd/sender — the consumer of `ratify.sequence.step` (built on
+   internal/events, dedupes on event_id). For each message, in ONE
+   synchronous code path, before calling Postal:
+   a. consent.CanContact(recipient) — consent/lawful basis, do_not_contact;
+   b. suppression_list for recipient email AND recipient domain;
+   c. unsubscribe: tenant `unsubscribes` and `global_unsubscribes`
+      (non-tenant table per CLAUDE.md);
+   d. sending domain status = active|warming and today's sent count <
+      daily_cap (atomic increment in Postgres, not Redis, so it survives
+      restarts).
+   Any check failing or erroring = no send. Outcomes:
+   - (a)/(b)/(c) fail → enrollment `blocked` with reason; never retried.
+   - (d) cap reached → HARD block for today: the step is NOT sent today and
+     is NOT silently deferred. The enrollment moves to `paused` with
+     status_reason `domain_daily_cap`, an alert/notification is raised to
+     the sequence owner, and it resumes automatically at the next
+     send-window opening when capacity exists. Visible, never silent.
+   - Postal unreachable → step rescheduled with backoff (infrastructure
+     failure, not a policy decision).
+
+4. Unsubscribe (required by Gmail/Yahoo bulk-sender rules):
+   - Every outbound.* message carries `List-Unsubscribe` (https URL +
+     mailto) and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`
+     (RFC 8058).
+   - POST /u/{token} (one-click, no auth, signed token encoding tenant +
+     recipient) records the unsubscribe and stops active enrollments for
+     that contact within the same request. GET /u/{token} renders a
+     confirmation page. Processed immediately, never "within 10 days".
+   - Every outbound body includes a visible unsubscribe link.
+
+5. Warmup engine:
+   - New domain starts at 100/day; doubles every N days (configurable,
+     default 2-3) up to a ceiling.
+   - Auto-pause on complaint rate > 0.1% OR hard-bounce rate > 2% over a
+     trailing 7 days, evaluated only when the window has ≥ 500 sends; below
+     that, pause on ≥ 2 complaints or ≥ 5 hard bounces in 7 days.
+     Pause → domain `paused`, alert, all sequences using it paused.
+   - The warmup monitor runs per tenant (iterates tenants per CLAUDE.md).
+
+6. Feedback loops:
+   - Webhooks /webhooks/postal/bounce and /webhooks/postal/complaint,
+     authenticated by Postal's webhook signature.
+   - Hard bounce → suppression_list insert committed BEFORE the webhook
+     returns 200; signal `bounced` to the enrollment workflow.
+   - Complaint → suppression + unsubscribe + complaint_events row +
+     evaluate domain auto-pause.
+   - Note in docs: Gmail does not send complaint FBLs; monitor Postmaster
+     Tools spam rate manually during warmup.
+
+7. Reply detection: Postal inbound route → POST /webhooks/postal/inbound
+   (signature-verified). Match by Message-ID/In-Reply-To first, then by
+   contact email within the tenant. Signal `replied`, log an Activity
+   (email_received, created_by `system`).
+
+8. scripts/warmup-check.sh: sends to seed addresses (Gmail, Outlook,
+   Yahoo, corporate — configured in env) and reports placement from a
+   seed-mailbox IMAP check. Run weekly during warmup.
+
+9. Tests (Postal mocked at the SMTP/API boundary):
+   - Suppressed recipient → no Postal call (assert mock received nothing).
+   - Revoked consent / do_not_contact → no Postal call.
+   - Cap 100: messages 1-100 relay, the 101st does not; enrollment
+     `paused` with `domain_daily_cap` and a notification exists.
+   - Bounce webhook → suppression row visible to an immediately following
+     send attempt, which is blocked.
+   - Complaint webhook → domain paused, sequences paused.
+   - One-click unsubscribe POST stops the enrollment and blocks the next
+     send; every outbound message has both List-Unsubscribe headers.
+   - Duplicate `ratify.sequence.step` event → exactly one Postal call.
+   - Auto-pause minimum-sample rule.
+
+Agent acceptance:
+- `make test` green; `make budget` passes.
+- A 100-message warmup simulation against mocked Postal completes in under
+  30 minutes.
+
+Ops exit gate (human — docs/ops/phase2-email.md):
+- Infra prerequisites above done.
+- Real staging send reaches inbox at Gmail, Outlook, Yahoo, corporate.
+- Warmup started (it needs 4-6 weeks before pilot volume).
+
+Commit when the agent acceptance is green. Phase 2 exit requires the ops
+gate.

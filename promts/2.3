@@ -1,0 +1,82 @@
+Read CLAUDE.md.
+
+Implement Sprint 2.3: native calendar and meeting scheduling.
+
+Deliverables:
+
+1. availability: id, tenant_id, user_id, day_of_week, start_time,
+   end_time, timezone (IANA), buffer_before_min, buffer_after_min. RLS +
+   composite FK to users. Default: Mon-Fri 09:00-17:00 in the user's
+   timezone.
+
+2. booking_page: id, tenant_id, user_id NULL or team_id NULL (exactly one,
+   CHECK), slug (UNIQUE (tenant_id, slug)), title, duration_min,
+   description, required_fields jsonb (default: name, email),
+   redirect_url, active bool. Team pages round-robin across team_members.
+
+3. meeting: id, tenant_id, booking_page_id, host_user_id, contact_id,
+   opportunity_id NULL, starts_at timestamptz, ends_at timestamptz,
+   host_timezone, invitee_timezone, status ('booked','rescheduled',
+   'cancelled'), external_event_id, external_provider, created_at.
+   Double-booking is impossible at the DB level:
+   `EXCLUDE USING gist (tenant_id WITH =, host_user_id WITH =,
+   tstzrange(starts_at - buffer_before, ends_at + buffer_after) WITH &&)
+   WHERE status <> 'cancelled'` (store the buffered range in a column).
+
+4. calendar_sync: users connect Google Calendar and/or Microsoft 365 via
+   OAuth (minimal scopes: free/busy + event write on the primary calendar).
+   Refresh tokens encrypted via internal/secrets. A Temporal workflow per
+   connection syncs events hourly (cache for display). At booking time the
+   slot is ALSO re-checked with a live free/busy call — the hourly cache is
+   never trusted for the final decision. CalDAV/ICS is out of scope for this
+   sprint (note it as a follow-up).
+   Ops note (docs/ops/calendar-oauth.md): Google OAuth app verification for
+   calendar scopes and Microsoft app registration take time; start early.
+
+5. Booking flow:
+   - Tenant and page are resolved from `/book/{tenant_slug}/{page_slug}`
+     via a SECURITY DEFINER lookup function (per CLAUDE.md).
+   - GET renders available slots for the next 14 days = availability −
+     cached calendar events − existing meetings, shown in the invitee's
+     timezone.
+   - POST: live free/busy check → insert meeting (exclusion constraint is
+     the final arbiter; conflict → 409 with fresh slots) → create Contact if
+     new (consent fields: lawful_basis 'contract', source 'booking') →
+     Activity (meeting) → outbox meeting.booked → confirmation email via
+     the transactional stream (outbox → sender; still passes the send gate
+     but is exempt from the outbound warmup cap) → create the external
+     calendar event.
+   - Reschedule and cancel via signed links; both update the meeting and
+     the external event.
+
+6. Meeting prep brief: when a meeting is booked, a Temporal activity
+   generates a brief (account context, deal stage, recent activities,
+   contact role if known) via internal/llm. Per CLAUDE.md this is a
+   DERIVED ANNOTATION: stored in `ai_annotations` (tenant_id, subject_type
+   'meeting', subject_id, kind 'prep_brief', content jsonb,
+   model_version, produced_by, created_at), never in business columns.
+
+7. Tests:
+   - Slot overlapping an existing calendar event (live free/busy mock) →
+     rejected.
+   - Slot violating buffer → rejected.
+   - Two concurrent POSTs for the same slot → exactly one succeeds
+     (exclusion constraint).
+   - Reschedule updates the meeting and calls the provider update.
+   - Timezone: a 09:00 America/New_York slot booked by an invitee in
+     Asia/Kolkata is stored as 13:00/14:00 UTC (DST-correct) and shown as
+     09:00 to the host.
+   - DST transition week produces correct slots.
+   - Prep brief stored as an ai_annotation with model_version.
+
+Agent acceptance:
+- `make test` green.
+- End-to-end booking works against mocked Google/Microsoft APIs and
+  mocked Postal.
+
+Ops exit gate (human — docs/ops/phase2-calendar.md):
+- A booking lands on a real Google and a real M365 calendar.
+- The confirmation email arrives.
+
+Commit when the agent acceptance is green. Phase 2 exit: the 2.2 and 2.3
+ops gates both pass.

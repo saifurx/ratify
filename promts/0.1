@@ -1,0 +1,64 @@
+Read CLAUDE.md.
+
+Scaffold Sprint 0.1 of Ratify: tenant isolation, auth, migrations, and the
+RLS isolation gate test. Deliver exactly these files:
+
+- go.mod (module `ratify`)
+- cmd/api/main.go — HTTP server with /healthz, /api/whoami, /api/accounts
+  (GET list, POST create). Builds the pool via `db.NewPool` and refuses to
+  boot if `db.AssertNotPrivileged` fails.
+- internal/platform/config.go — env config
+- internal/platform/auth.go — OIDC verifier via go-oidc. Dev mode when
+  OIDC_ISSUER is empty AND ENV != production; dev mode trusts X-Tenant-Id
+  and X-User-Id headers. Production without OIDC_ISSUER is a boot error.
+  Missing/invalid tenant claim → 403, not "see all".
+- internal/platform/httpx.go — JSON helpers, RequestLogger (never logs
+  request bodies or emails)
+- internal/tenant/context.go — With/From
+- internal/db/pool.go — `NewPool` (the only place pgxpool is constructed)
+  and `AssertNotPrivileged`: rejects superuser, `app_migrator`, any role
+  with BYPASSRLS, and any role that owns a table in the public schema.
+- internal/db/tx.go — TenantTx.WithTenant, the ONLY path to the DB.
+  Uses set_tenant($1) which wraps set_config(..., true). Missing context
+  returns ErrNoTenant.
+- internal/account/repository.go — List has NO tenant predicate (RLS
+  supplies it). Create uses current_tenant() for tenant_id, never client
+  input.
+- internal/account/handler.go
+- migrations/000001_init.up.sql — set_tenant(), current_tenant() (uses
+  current_setting('app.tenant_id', true), returns NULL when unset),
+  tenants table, accounts table with UNIQUE (tenant_id, id), ENABLE + FORCE
+  RLS on both, accounts_isolation policy (USING + WITH CHECK), indexes on
+  (tenant_id, created_at) and (tenant_id, lower(domain)). Tables are owned
+  by app_migrator, never by app_user.
+- migrations/000001_init.down.sql
+- deploy/initdb/01-roles.sql — app_user, app_migrator, ferriskey_user
+  roles; ferriskey database; schema grants. Dev passwords only. No role
+  gets BYPASSRLS. app_user: SELECT on tenants; SELECT/INSERT/UPDATE/DELETE
+  on accounts; no DDL.
+- deploy/Dockerfile.api — multi-stage, distroless
+- deploy/.env.example
+- deploy/docker-compose.yml — postgres, redis, migrate, api. Every service
+  has mem_limit and cpus matching the CLAUDE.md budget table. FerrisKey is
+  profile-gated `oidc`. All images pinned to a specific tag.
+- tests/tenant_isolation_test.go — runs as app_user. Four subtests: sees
+  only own rows, no tenant context fails closed, raw query outside wrapper
+  sees nothing, cannot insert into another tenant.
+- Makefile — init, up, down, migrate, test, psql, seed, clean, budget
+  (`make budget` sums compose mem_limit and fails above 14 GB)
+- README.md — run instructions, the OIDC enable steps, the note that
+  set_tenant MUST use transaction scope (and why SET SESSION is forbidden).
+
+Agent acceptance:
+- `make up && make test` passes all four isolation subtests
+- `make seed` prints a TENANT_ID
+- POST /api/accounts with X-Tenant-Id=<tenant> succeeds, then GET with a
+  DIFFERENT tenant id returns empty items
+- No package outside internal/db imports pgxpool:
+  `grep -rl pgxpool --include=*.go . | grep -v '^./internal/db/'` is empty
+- AssertNotPrivileged rejects superuser, app_migrator, and a table owner on
+  startup (unit test with each)
+- `make budget` passes
+
+Do not implement Kafka, FerrisKey default-on, Next.js, agents, or the
+decision gate yet. Those are later sprints. Commit when tests pass.
