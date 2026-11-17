@@ -14,18 +14,22 @@ import (
 type Role string
 
 const (
-	RoleApp Role = "app_user"
-	// Later sprints add RoleRelay, RoleAgentWorker, RoleGate, RoleMLWorker.
+	RoleApp   Role = "app_user"
+	RoleRelay Role = "relay_user"
+	// Later sprints add RoleAgentWorker, RoleGate, RoleMLWorker.
 )
 
 // Pool wraps pgxpool so nothing outside this package can touch it.
-type Pool struct{ p *pgxpool.Pool }
+type Pool struct {
+	p    *pgxpool.Pool
+	role Role
+}
 
 // NewPool builds a pool for the given role. The connection's current_user
 // is NOT trusted to match: call AssertNotPrivileged before serving.
 func NewPool(ctx context.Context, role Role, url string) (*Pool, error) {
 	switch role {
-	case RoleApp:
+	case RoleApp, RoleRelay:
 	default:
 		return nil, fmt.Errorf("db: unknown role %q", role)
 	}
@@ -40,7 +44,7 @@ func NewPool(ctx context.Context, role Role, url string) (*Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("db: new pool: %w", err)
 	}
-	return &Pool{p: p}, nil
+	return &Pool{p: p, role: role}, nil
 }
 
 func (p *Pool) Close()                         { p.p.Close() }

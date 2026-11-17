@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"ratify/internal/db"
+	"ratify/internal/outbox"
 )
 
 type Account struct {
@@ -46,5 +47,11 @@ func (Repository) Create(ctx context.Context, tx db.Tx, name string, domain *str
 		 VALUES (current_tenant(), $1, $2)
 		 RETURNING id::text, tenant_id::text, name, domain, created_at`,
 		name, domain).Scan(&a.ID, &a.TenantID, &a.Name, &a.Domain, &a.CreatedAt)
+	if err != nil {
+		return a, err
+	}
+	// Same transaction as the insert: the event exists iff the account commits.
+	_, err = outbox.Append(ctx, tx, "ratify.account.created", a.ID,
+		map[string]any{"account_id": a.ID, "name": a.Name, "domain": a.Domain})
 	return a, err
 }

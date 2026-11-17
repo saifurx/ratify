@@ -42,6 +42,51 @@ services:
     volumes: ["../migrations:/migrations:ro"]
     command: ["-path=/migrations", "-database", "postgres://app_migrator:${MIGRATOR_PASSWORD}@postgres:5432/ratify?sslmode=disable", "up"]
 
+  kafka:
+    image: apache/kafka:4.0.0
+    mem_limit: 2g
+    cpus: 1.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_HEAP_OPTS: "-Xms512m -Xmx1024m"
+    volumes: [kafkadata:/var/lib/kafka/data]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
+  relay:
+    build: {context: .., dockerfile: deploy/Dockerfile.relay}
+    image: ratify-relay:0.2.0
+    mem_limit: 256m
+    cpus: 0.25
+    depends_on:
+      kafka: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    environment:
+      DATABASE_URL: postgres://relay_user:${RELAY_USER_PASSWORD}@postgres:5432/ratify?sslmode=disable
+      KAFKA_BROKERS: kafka:9092
+      RELAY_INSTANCE_ID: relay-1
+      GOMEMLIMIT: 200MiB
+    restart: unless-stopped
+
   api:
     build: {context: .., dockerfile: deploy/Dockerfile.api}
     image: ratify-api:0.1.0
@@ -77,3 +122,4 @@ services:
 
 volumes:
   pgdata:
+  kafkadata:

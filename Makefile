@@ -10,6 +10,8 @@ GO = docker run --rm --network $(NET) -v $(CURDIR):/src -w /src \
   -e CGO_ENABLED=0 \
   -e DATABASE_URL=postgres://app_user:$(APP_USER_PASSWORD)@postgres:5432/ratify?sslmode=disable \
   -e MIGRATOR_URL=postgres://app_migrator:$(MIGRATOR_PASSWORD)@postgres:5432/ratify?sslmode=disable \
+  -e RELAY_URL=postgres://relay_user:$(RELAY_USER_PASSWORD)@postgres:5432/ratify?sslmode=disable \
+  -e KAFKA_BROKERS=kafka:9092 \
   -e ADMIN_URL=postgres://postgres:$(POSTGRES_PASSWORD)@postgres:5432/ratify?sslmode=disable \
   $(GO_IMAGE)
 
@@ -30,8 +32,14 @@ tidy:
 	$(GO) go mod tidy
 
 # Runs unit + isolation tests as app_user (seeding as app_migrator).
+# The compose relay is stopped during tests so it cannot race the test relays.
 test: init
-	$(GO) go test -count=1 -tags dbtest ./...
+	@$(COMPOSE) stop relay >/dev/null 2>&1 || true
+	@$(GO) go test -count=1 -p 1 -tags dbtest ./... ; rc=$$?; \
+	  $(COMPOSE) start relay >/dev/null 2>&1 || true; \
+	  echo "--- kafka resource snapshot (heap capped by -Xmx1024m) ---"; \
+	  docker stats --no-stream --format '{{.Name}} mem={{.MemUsage}} cpu={{.CPUPerc}}' ratify-kafka-1 ratify-relay-1 2>/dev/null || true; \
+	  exit $$rc
 
 psql:
 	$(COMPOSE) exec postgres psql -U app_user -d ratify

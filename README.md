@@ -1,7 +1,7 @@
 # Ratify
 
 Native CRM + AI sales optimization platform. Architecture rules live in
-[CLAUDE.md](CLAUDE.md). This is Sprint 0.1: tenant isolation, auth, migrations.
+[CLAUDE.md](CLAUDE.md). Sprints so far: 0.1 tenant isolation, auth, migrations; 0.2 Kafka + transactional outbox.
 
 ## Run
 
@@ -52,3 +52,32 @@ BYPASSRLS role or as `app_migrator`.
 ## Dev credentials
 
 `deploy/initdb/01-roles.sql` creates dev-only role passwords; never reuse them.
+
+## Kafka and the outbox (Sprint 0.2)
+
+- Apache Kafka 4.0.0, KRaft single broker (RF=1, heap `-Xms512m -Xmx1024m`,
+  `mem_limit` 2g). Not Redpanda (license).
+- **Handlers never call Kafka.** They call `outbox.Append(ctx, tx, topic, key,
+  payload)` inside their own transaction, so an event exists iff the business
+  write commits. The relay (`cmd/relay`, role `relay_user`) publishes rows.
+- **Delivery is at-least-once.** A Postgres and a Kafka transaction cannot
+  commit atomically; a crash between the Kafka commit and the Postgres commit
+  republishes the row (a duplicate on the topic is expected). Every message
+  carries `event_id` (= `outbox.id`), `tenant_id`, `event_type`, `occurred_at`
+  headers. Consumers use `internal/events`, which reads `read_committed` and
+  dedupes on `event_id` (`processed_events`) in the handler's transaction, which
+  gives exactly-once *processing*. Never claim exactly-once publication.
+- The relay uses a stable `transactional.id` per instance
+  (`RELAY_INSTANCE_ID`); a restarted instance fences and aborts its
+  predecessor's open Kafka transaction.
+- Cross-tenant access is one role-specific policy (`outbox_relay`, only on
+  `outbox`); `relay_user` can read no other table, and may only update the
+  dispatch bookkeeping columns. No BYPASSRLS anywhere.
+- Retries use exponential backoff. A row failing 10 times is dead-lettered
+  (`dead_lettered_at`, `outbox_dead_letter` on stderr) and never blocks other
+  keys. Kafka being unreachable does not charge attempts: rows wait (the outbox
+  buffers) and the relay resumes. Rows with the same key publish in `seq` order.
+- `make test` stops the compose relay while tests run (so it cannot race the
+  test relays), restarts it afterwards, and prints a `docker stats` snapshot of
+  Kafka and the relay. Fresh role changes require `make clean && make up`
+  (initdb only runs on an empty volume).

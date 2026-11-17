@@ -11,5 +11,7 @@ check "no SET SESSION in code or SQL" \
   "grep -rniE 'set[[:space:]]+session' --include=*.go --include=*.sql --include=*.yml --include=Makefile . | grep -v '^./scripts/' | grep -v '^./promts/'"
 check "no set_config(..., false)" \
   "grep -rniE \"set_config\\([^)]*,[[:space:]]*false\\)\" --include=*.go --include=*.sql . | grep -v '^./promts/'"
+check "Kafka client imports only in internal/outbox, internal/events, cmd/relay" \
+  "grep -rl 'twmb/franz-go' --include=*.go . | grep -v -E '^./(internal/outbox|internal/events|cmd/relay)/'"
 check "compose limits, pins, budget" "python3 scripts/budget.py | grep -E '^(FAIL|  )'"
 exit $fail

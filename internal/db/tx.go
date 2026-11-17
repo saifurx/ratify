@@ -45,3 +45,31 @@ func (t *TenantTx) WithTenant(ctx context.Context, fn func(ctx context.Context, 
 	}
 	return nil
 }
+
+// SystemTx runs transactions WITHOUT a tenant binding, for cross-tenant
+// system roles (CLAUDE.md "Cross-tenant system roles"). It refuses pools of
+// the application role: those must always use TenantTx. Access is still
+// limited by the system role's own grants and role-specific RLS policies.
+type SystemTx struct{ pool *Pool }
+
+func NewSystemTx(p *Pool) (*SystemTx, error) {
+	if p.role == RoleApp {
+		return nil, fmt.Errorf("db: SystemTx is not allowed for role %q", p.role)
+	}
+	return &SystemTx{pool: p}, nil
+}
+
+func (s *SystemTx) WithTx(ctx context.Context, fn func(ctx context.Context, tx Tx) error) error {
+	tx, err := s.pool.p.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("db: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if err := fn(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("db: commit: %w", err)
+	}
+	return nil
+}
