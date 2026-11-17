@@ -13,6 +13,7 @@ type Config struct {
 	DatabaseURL  string
 	OIDCIssuer   string
 	OIDCClientID string
+	CursorSecret string
 }
 
 // LoadConfig reads the environment and validates boot-time invariants.
@@ -25,6 +26,7 @@ func configFrom(get func(string) string) (Config, error) {
 		DatabaseURL:  get("DATABASE_URL"),
 		OIDCIssuer:   strings.TrimSpace(get("OIDC_ISSUER")),
 		OIDCClientID: strings.TrimSpace(get("OIDC_CLIENT_ID")),
+		CursorSecret: get("CURSOR_SECRET"),
 	}
 	if c.Env == "" {
 		c.Env = "development"
@@ -34,6 +36,12 @@ func configFrom(get func(string) string) (Config, error) {
 	}
 	if c.DatabaseURL == "" {
 		return c, errors.New("config: DATABASE_URL is required")
+	}
+	if c.CursorSecret == "" {
+		if c.Env == "production" {
+			return c, errors.New("config: CURSOR_SECRET is required when ENV=production")
+		}
+		c.CursorSecret = "dev-cursor-secret-do-not-use-in-production"
 	}
 	if c.Env == "production" && c.OIDCIssuer == "" {
 		return c, errors.New("config: OIDC_ISSUER is required when ENV=production")

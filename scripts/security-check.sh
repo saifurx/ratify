@@ -15,5 +15,9 @@ check "Kafka client imports only in internal/outbox, internal/events, cmd/relay"
   "grep -rl 'twmb/franz-go' --include=*.go . | grep -v -E '^./(internal/outbox|internal/events|cmd/relay)/'"
 check "app services reach Postgres only through PgBouncer (migrate connects directly)" \
   "grep -nE 'DATABASE_URL:.*@postgres:' deploy/docker-compose.yml | grep -v ferriskey"
+check "no tenant_id filter in repositories (RLS supplies it)" \
+  "grep -rnE \"(WHERE|AND)[[:space:]]+[a-z_.]*tenant_id[[:space:]]*=[[:space:]]*([$][0-9]|'|current_tenant)\" --include=*.go internal cmd | grep -v '_test.go'"
+check "schema lint: RLS forced, UNIQUE(tenant_id,id), composite FKs, listed cross-tenant policies only" \
+  "docker compose --env-file deploy/.env -f deploy/docker-compose.yml exec -T postgres psql -U postgres -d ratify -XAt -f - < scripts/rls-check.sql"
 check "compose limits, pins, budget" "python3 scripts/budget.py | grep -E '^(FAIL|  )'"
 exit $fail

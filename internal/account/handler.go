@@ -1,75 +1,101 @@
 package account
 
 import (
-	"context"
-	"errors"
+	"encoding/json"
 	"log/slog"
 	"net/http"
-	"strings"
 
-	"ratify/internal/db"
+	"ratify/internal/crud"
+	"ratify/internal/pagination"
 	"ratify/internal/platform"
 )
 
 type Handler struct {
-	tx   *db.TenantTx
-	repo Repository
-	log  *slog.Logger
+	svc   *Service
+	codec pagination.Codec
+	log   *slog.Logger
 }
 
-func NewHandler(tx *db.TenantTx, log *slog.Logger) *Handler {
-	return &Handler{tx: tx, log: log}
+func NewHandler(svc *Service, codec pagination.Codec, log *slog.Logger) *Handler {
+	return &Handler{svc: svc, codec: codec, log: log}
 }
 
 func (h *Handler) Register(mux *http.ServeMux, protect func(http.Handler) http.Handler) {
-	mux.Handle("GET /api/accounts", protect(http.HandlerFunc(h.list)))
-	mux.Handle("POST /api/accounts", protect(http.HandlerFunc(h.create)))
-}
-
-func (h *Handler) fail(w http.ResponseWriter, err error) {
-	if errors.Is(err, db.ErrNoTenant) {
-		platform.WriteError(w, http.StatusForbidden, "missing tenant")
-		return
-	}
-	h.log.Error("account request failed", "err", err.Error())
-	platform.WriteError(w, http.StatusInternalServerError, "internal error")
+	f := func(fn http.HandlerFunc) http.Handler { return protect(fn) }
+	mux.Handle("GET /api/v1/accounts", f(h.list))
+	mux.Handle("POST /api/v1/accounts", f(h.create))
+	mux.Handle("GET /api/v1/accounts/{id}", f(h.get))
+	mux.Handle("PATCH /api/v1/accounts/{id}", f(h.update))
+	mux.Handle("DELETE /api/v1/accounts/{id}", f(h.delete))
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
-	var items []Account
-	err := h.tx.WithTenant(r.Context(), func(ctx context.Context, tx db.Tx) (err error) {
-		items, err = h.repo.List(ctx, tx)
-		return
-	})
+	limit, after, err := crud.ParsePage(r, h.codec)
 	if err != nil {
-		h.fail(w, err)
+		platform.WriteErr(w, h.log, err)
 		return
 	}
-	platform.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+	owner, err := crud.OptionalUUID(r, "owner_id")
+	if err != nil {
+		platform.WriteErr(w, h.log, err)
+		return
+	}
+	items, next, err := h.svc.List(r.Context(), Filter{OwnerID: owner}, after, limit)
+	if err != nil {
+		platform.WriteErr(w, h.log, err)
+		return
+	}
+	crud.WriteList(w, r, h.codec, items, next)
+}
+
+func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
+	id, err := crud.PathID(r, "id")
+	if err == nil {
+		var a Account
+		if a, err = h.svc.Get(r.Context(), id); err == nil {
+			platform.WriteJSON(w, http.StatusOK, a)
+			return
+		}
+	}
+	platform.WriteErr(w, h.log, err)
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		Name   string  `json:"name"`
-		Domain *string `json:"domain"`
-	}
+	var in Input
 	if err := platform.DecodeJSON(w, r, &in); err != nil {
 		platform.WriteError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	in.Name = strings.TrimSpace(in.Name)
-	if n := len(in.Name); n == 0 || n > 200 {
-		platform.WriteError(w, http.StatusBadRequest, "name must be 1-200 characters")
-		return
-	}
-	var a Account
-	err := h.tx.WithTenant(r.Context(), func(ctx context.Context, tx db.Tx) (err error) {
-		a, err = h.repo.Create(ctx, tx, in.Name, in.Domain)
-		return
-	})
+	a, err := h.svc.Create(r.Context(), in)
 	if err != nil {
-		h.fail(w, err)
+		platform.WriteErr(w, h.log, err)
 		return
 	}
 	platform.WriteJSON(w, http.StatusCreated, a)
+}
+
+func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
+	id, err := crud.PathID(r, "id")
+	if err == nil {
+		var body map[string]json.RawMessage
+		if body, err = crud.DecodeBody(w, r); err == nil {
+			var a Account
+			if a, err = h.svc.Update(r.Context(), id, body); err == nil {
+				platform.WriteJSON(w, http.StatusOK, a)
+				return
+			}
+		}
+	}
+	platform.WriteErr(w, h.log, err)
+}
+
+func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
+	id, err := crud.PathID(r, "id")
+	if err == nil {
+		if err = h.svc.Delete(r.Context(), id); err == nil {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+	platform.WriteErr(w, h.log, err)
 }

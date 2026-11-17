@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
+	github.com/graphql-go/graphql v0.8.1
 	github.com/jackc/pgx/v5 v5.13.0
 	github.com/prometheus/client_golang v1.22.0
 	github.com/twmb/franz-go v1.20.7

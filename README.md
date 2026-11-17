@@ -1,7 +1,7 @@
 # Ratify
 
 Native CRM + AI sales optimization platform. Architecture rules live in
-[CLAUDE.md](CLAUDE.md). Sprints so far: 0.1 tenant isolation, auth, migrations; 0.2 Kafka + transactional outbox; 1.4a PgBouncer + metrics skeleton.
+[CLAUDE.md](CLAUDE.md). Sprints so far: 0.1 tenant isolation, auth, migrations; 0.2 Kafka + transactional outbox; 1.4a PgBouncer + metrics skeleton; 1.1 users/teams/authz + CRM API.
 
 ## Run
 
@@ -19,8 +19,9 @@ make down | make clean
 Try it (dev mode trusts headers):
 
 ```bash
-curl -XPOST localhost:8080/api/accounts -H "X-Tenant-Id: $TENANT_ID" -d '{"name":"Acme"}'
-curl localhost:8080/api/accounts -H "X-Tenant-Id: <another uuid>"   # {"items":[]}
+H=(-H "X-Tenant-Id: $TENANT_ID" -H "X-User-Id: me" -H "X-Role: admin")
+curl -XPOST localhost:8080/api/v1/accounts "${H[@]}" -d '{"name":"Acme"}'
+curl localhost:8080/api/v1/accounts "${H[@]}"
 ```
 
 ## Tenant binding: why transaction scope
@@ -100,3 +101,41 @@ BYPASSRLS role or as `app_migrator`.
   backup metrics plus Grafana arrive in 1.4b.
 - `make init` appends variables added to `deploy/.env.example` to an existing
   `deploy/.env` (never overwrites).
+
+## CRM API and authorization (Sprint 1.1)
+
+REST under `/api/v1` (accounts, contacts, opportunities, activities, pipelines
+and stages, users, teams) plus a read-only GraphQL account-360 query at
+`POST /api/v1/graphql`. Lists use opaque keyset cursors (`?limit=&cursor=`);
+the cursor is HMAC-signed with `CURSOR_SECRET`, binds the tenant into the
+signature without encoding it, and is rejected under any other tenant.
+Filters: `owner_id` (accounts, contacts, opportunities), `status`
+(opportunities), plus `account_id`/`contact_id`/`opportunity_id`/`type` where
+they apply.
+
+**Two layers, kept separate.** RLS is the tenant boundary only. In-tenant
+visibility is `authz.Scope(ctx)`, applied in the service layer to every
+list/get/update/delete as an *owner* filter (never a tenant filter):
+
+| role | visibility | writes |
+|------|-----------|--------|
+| rep | `owner_id = self` | own records |
+| manager | members of the teams they manage (+ self) | those records |
+| admin | whole tenant | yes (pipelines, teams are admin-only) |
+| finance, legal | whole tenant | no |
+| agent, system (service principals) | whole tenant | no (until a later sprint) |
+
+An out-of-scope record is a 404, never a 403 (existence is not revealed).
+Users are upserted from token claims on the first authenticated request
+(dev mode: `X-User-Id` + `X-Role`; an unknown role or missing subject is 403,
+never a default grant). Every FK between tenant tables is composite, so a row
+can never reference another tenant's record. Domain events
+(`contact.created/updated`, `opportunity.created/stage_changed`,
+`activity.logged`, `account.created`) go through the outbox in the same
+transaction; `audit_log` is append-only. Public tenant lookups
+(`resolve_tenant_token`, `resolve_tenant_slug`) are SECURITY DEFINER functions
+that return only the tenant id.
+
+`make security-check` also lints the live schema (RLS enabled and forced,
+`UNIQUE (tenant_id, id)`, composite FKs, only the two documented cross-tenant
+policies, no BYPASSRLS) and rejects tenant filters in repositories.

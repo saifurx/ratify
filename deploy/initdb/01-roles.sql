@@ -32,3 +32,18 @@ $$ SELECT usename::text, passwd::text FROM pg_catalog.pg_shadow WHERE usename = 
 REVOKE ALL ON FUNCTION pgbouncer.user_lookup(text) FROM PUBLIC;
 GRANT USAGE ON SCHEMA pgbouncer TO pgbouncer_auth;
 GRANT EXECUTE ON FUNCTION pgbouncer.user_lookup(text) TO pgbouncer_auth;
+
+-- Sprint 1.1: citext is a trusted extension; app_migrator needs CREATE on
+-- the database to install it from a migration.
+GRANT CREATE ON DATABASE ratify TO app_migrator;
+
+-- Public tenant lookups (tenant_token, booking slug) go through narrow
+-- SECURITY DEFINER functions owned by this NOLOGIN role, which has the only
+-- other cross-tenant policy besides the outbox relay (on tenants, id/slug/
+-- token columns only). It must hold CREATE on public so the migration can
+-- hand the functions to it; it can log in nowhere and owns no tables.
+CREATE ROLE tenant_resolver NOLOGIN NOSUPERUSER NOBYPASSRLS;
+-- SET only (needed to hand function ownership over); INHERIT FALSE so the
+-- role's cross-tenant policy does NOT apply to app_migrator.
+GRANT tenant_resolver TO app_migrator WITH INHERIT FALSE, SET TRUE;
+GRANT USAGE, CREATE ON SCHEMA public TO tenant_resolver;

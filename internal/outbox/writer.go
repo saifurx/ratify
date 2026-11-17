@@ -62,3 +62,11 @@ func Append(ctx context.Context, tx db.Tx, topic, key string, payload any) (stri
 	}
 	return id, nil
 }
+
+// RecordEvent appends a domain event ("contact.created" becomes topic
+// "ratify.contact.created") inside the caller's transaction. Payloads carry
+// ids and non-PII facts only.
+func RecordEvent(ctx context.Context, tx db.Tx, eventType, aggregateID string, payload any) error {
+	_, err := Append(ctx, tx, "ratify."+eventType, aggregateID, payload)
+	return err
+}

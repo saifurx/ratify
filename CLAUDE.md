@@ -102,6 +102,11 @@ warmup monitor, forecasting, embedding backfill, Temporal workers). Rules:
   role with a role-specific policy on exactly the table(s) it needs
   (e.g. `CREATE POLICY outbox_relay ON outbox TO relay_user USING (true)`).
 - Never grant BYPASSRLS. Never reuse app_user for system work.
+- The complete list of cross-tenant policies (enforced by `make security-check`):
+  `outbox_relay` (relay_user, outbox only) and `tenants_resolver`
+  (tenant_resolver NOLOGIN, id/slug/token columns, used only by the
+  SECURITY DEFINER lookup functions). Role memberships that exist only to
+  hand over ownership use `INHERIT FALSE` so policies are not inherited.
 - Python ML/batch jobs that need the database (lead scoring 1.2, embedding
   backfill 3.3, forecasting 4.2) connect as the dedicated `ml_worker` role
   (created in 1.2): not an owner, no BYPASSRLS, through PgBouncer, per-table

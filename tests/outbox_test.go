@@ -146,7 +146,7 @@ func TestOutbox(t *testing.T) {
 		tid := seed(t)
 		boom := errors.New("boom")
 		err := tx.WithTenant(tenant.With(ctx, tid), func(c context.Context, q db.Tx) error {
-			if _, err := repo.Create(c, q, "rolled-back", nil); err != nil {
+			if _, err := repo.Create(c, q, account.Input{Name: "rolled-back"}); err != nil {
 				return err
 			}
 			return boom // failure AFTER Append
@@ -159,7 +159,7 @@ func TestOutbox(t *testing.T) {
 		}
 		var acct account.Account
 		if err := tx.WithTenant(tenant.With(ctx, tid), func(c context.Context, q db.Tx) (err error) {
-			acct, err = repo.Create(c, q, "committed", nil)
+			acct, err = repo.Create(c, q, account.Input{Name: "committed"})
 			return
 		}); err != nil {
 			t.Fatal(err)
@@ -180,7 +180,7 @@ func TestOutbox(t *testing.T) {
 		var acct account.Account
 		start := time.Now()
 		if err := tx.WithTenant(tenant.With(ctx, tid), func(c context.Context, q db.Tx) (err error) {
-			acct, err = repo.Create(c, q, "published", nil)
+			acct, err = repo.Create(c, q, account.Input{Name: "published"})
 			return
 		}); err != nil {
 			t.Fatal(err)
@@ -227,7 +227,7 @@ func TestOutbox(t *testing.T) {
 		txid := uniq("t4")
 		var acct account.Account
 		if err := tx.WithTenant(tenant.With(ctx, tid), func(c context.Context, q db.Tx) (err error) {
-			acct, err = repo.Create(c, q, "dup", nil)
+			acct, err = repo.Create(c, q, account.Input{Name: "dup"})
 			return
 		}); err != nil {
 			t.Fatal(err)

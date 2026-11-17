@@ -130,6 +130,7 @@ services:
       DATABASE_URL: postgres://app_user:${APP_USER_PASSWORD}@pgbouncer:6432/ratify?sslmode=disable
       OIDC_ISSUER: ${OIDC_ISSUER:-}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      CURSOR_SECRET: ${CURSOR_SECRET:-}
     ports: ["127.0.0.1:8080:8080"]
     healthcheck:
       test: ["CMD", "/api", "-healthcheck"]

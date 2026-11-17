@@ -11,9 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"ratify/internal/account"
 	"ratify/internal/db"
 	"ratify/internal/platform"
+	"ratify/internal/server"
 )
 
 func main() {
@@ -65,21 +65,14 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	metrics := platform.NewMetrics()
-	mux := http.NewServeMux()
-	mux.Handle("GET /metrics", metrics.Handler())
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		platform.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-	mux.Handle("GET /api/whoami", auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id, _ := platform.IdentityFrom(r.Context())
-		platform.WriteJSON(w, http.StatusOK, map[string]string{"tenant_id": id.TenantID, "user_id": id.UserID})
-	})))
-	account.NewHandler(db.NewTenantTx(pool), log).Register(mux, auth.Middleware)
+	handler, err := server.New(server.Deps{Cfg: cfg, Pool: pool, Auth: auth, Metrics: platform.NewMetrics(), Log: log})
+	if err != nil {
+		return err
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           metrics.Instrument(platform.RequestLogger(log, mux)),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
