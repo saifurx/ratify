@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS accounts;
+DROP TABLE IF EXISTS tenants;
+DROP FUNCTION IF EXISTS current_tenant();
+DROP FUNCTION IF EXISTS set_tenant(uuid);
