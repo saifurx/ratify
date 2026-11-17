@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"ratify/internal/activity"
 	"ratify/internal/audit"
 	"ratify/internal/authz"
 	"ratify/internal/crud"
@@ -61,7 +62,7 @@ type Input struct {
 	OwnerID     *string `json:"owner_id"`
 }
 
-type Filter struct{ OwnerID, Status, AccountID string }
+type Filter struct{ OwnerID, Status, AccountID, PipelineID string }
 
 type Repository struct{}
 
@@ -76,6 +77,9 @@ func (Repository) List(ctx context.Context, tx db.Tx, sc authz.ScopeInfo, f Filt
 	}
 	if f.AccountID != "" {
 		q.And("account_id = " + q.Arg(f.AccountID) + "::uuid")
+	}
+	if f.PipelineID != "" {
+		q.And("pipeline_id = " + q.Arg(f.PipelineID) + "::uuid")
 	}
 	return crud.List(ctx, tx, "SELECT "+cols+" FROM opportunities", q, after, limit, scan,
 		func(o Opportunity) pagination.Position { return pagination.Position{CreatedAt: o.CreatedAt, ID: o.ID} })
@@ -136,6 +140,9 @@ func (s *Service) List(ctx context.Context, r *http.Request, after *pagination.P
 		return nil, nil, err
 	}
 	if f.AccountID, err = crud.OptionalUUID(r, "account_id"); err != nil {
+		return nil, nil, err
+	}
+	if f.PipelineID, err = crud.OptionalUUID(r, "pipeline_id"); err != nil {
 		return nil, nil, err
 	}
 	err = s.tx.WithTenant(ctx, func(ctx context.Context, tx db.Tx) (err error) {
@@ -275,6 +282,16 @@ func (s *Service) Update(ctx context.Context, id string, body map[string]json.Ra
 			if err := outbox.RecordEvent(ctx, tx, "opportunity.stage_changed", id, map[string]any{
 				"opportunity_id": id, "from_stage_id": before.StageID, "to_stage_id": o.StageID,
 				"from_phase": fromPhase, "to_phase": newPhase, "status": o.Status}); err != nil {
+				return err
+			}
+			// A human moved the deal: log it on the account/opportunity timeline.
+			var fromName, toName string
+			_ = tx.QueryRow(ctx, `SELECT name FROM stages WHERE id = $1::uuid`, before.StageID).Scan(&fromName)
+			_ = tx.QueryRow(ctx, `SELECT name FROM stages WHERE id = $1::uuid`, o.StageID).Scan(&toName)
+			meta, _ := json.Marshal(map[string]any{"kind": "stage_change", "from_stage_id": before.StageID, "to_stage_id": o.StageID})
+			if _, err := activity.LogInTx(ctx, tx, sc, activity.Input{Type: "note",
+				Subject: "Stage changed: " + fromName + " → " + toName, AccountID: o.AccountID,
+				OpportunityID: &id, Metadata: meta}); err != nil {
 				return err
 			}
 		}

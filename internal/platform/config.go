@@ -8,13 +8,13 @@ import (
 )
 
 type Config struct {
-	Env          string
-	Addr         string
-	DatabaseURL  string
-	OIDCIssuer   string
-	OIDCClientID string
-	CursorSecret string
-	RedisURL     string
+	Env                 string
+	Addr                string
+	DatabaseURL         string
+	OIDCIssuer          string
+	OIDCClientID        string
+	CursorSecret        string
+	RedisURL            string
 	InboundIPPerMin     int
 	InboundTenantPerMin int
 }

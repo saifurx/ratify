@@ -21,7 +21,6 @@ import (
 	"strings"
 	"time"
 
-
 	"ratify/internal/db"
 )
 

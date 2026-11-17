@@ -39,8 +39,18 @@ func (s *Service) List(ctx context.Context, r *http.Request, after *pagination.P
 	}
 	f := Filter{Source: r.URL.Query().Get("source"), PossibleDuplicate: r.URL.Query().Get("possible_duplicate") == "true"}
 	err = s.tx.WithTenant(ctx, func(ctx context.Context, tx db.Tx) (err error) {
-		items, next, err = list(ctx, tx, f, after, limit)
-		return
+		if items, next, err = list(ctx, tx, f, after, limit); err != nil {
+			return err
+		}
+		// The inbox explains a disabled Convert button per row.
+		for i := range items {
+			d, err := consent.CanContact(ctx, tx, items[i].Email)
+			if err != nil {
+				return err
+			}
+			items[i].CanContact = &d
+		}
+		return nil
 	})
 	return
 }

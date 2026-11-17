@@ -168,14 +168,6 @@ func (s *Service) Create(ctx context.Context, in Input) (a Activity, err error) 
 	if in.AccountID == "" {
 		return a, platform.Invalid{Msg: "account_id is required"}
 	}
-	occurred := time.Now().UTC()
-	if in.OccurredAt != nil {
-		occurred = *in.OccurredAt
-	}
-	meta := "{}"
-	if len(in.Metadata) > 0 {
-		meta = string(in.Metadata)
-	}
 	err = s.tx.WithTenant(ctx, func(ctx context.Context, tx db.Tx) error {
 		if err := sc.RequireVisible(ctx, tx, "accounts", in.AccountID); err != nil {
 			return err
@@ -191,19 +183,37 @@ func (s *Service) Create(ctx context.Context, in Input) (a Activity, err error) 
 			}
 		}
 		var err error
-		if a, err = scan(tx.QueryRow(ctx, `
-			INSERT INTO activities (tenant_id, type, subject, body, occurred_at, contact_id, opportunity_id, account_id, metadata, created_by)
-			VALUES (current_tenant(), $1, $2, $3, $4, $5::uuid, $6::uuid, $7::uuid, $8::jsonb, $9)
-			RETURNING `+cols, in.Type, in.Subject, in.Body, occurred, in.ContactID, in.OpportunityID, in.AccountID, meta, sc.UserID)); err != nil {
-			return err
-		}
-		if err := outbox.RecordEvent(ctx, tx, "activity.logged", a.ID, map[string]any{
-			"activity_id": a.ID, "type": a.Type, "account_id": a.AccountID, "contact_id": a.ContactID, "opportunity_id": a.OpportunityID}); err != nil {
-			return err
-		}
-		return audit.Write(ctx, tx, sc.UserID, "activity.logged", "activity", a.ID, nil, nil)
+		a, err = LogInTx(ctx, tx, sc, in)
+		return err
 	})
 	return
+}
+
+// LogInTx inserts an activity authored by the caller inside an existing tenant
+// transaction and emits activity.logged. It performs no visibility checks:
+// callers either did them (Service.Create) or are acting on a record they just
+// modified (stage-change logging).
+func LogInTx(ctx context.Context, tx db.Tx, sc authz.ScopeInfo, in Input) (Activity, error) {
+	occurred := time.Now().UTC()
+	if in.OccurredAt != nil {
+		occurred = *in.OccurredAt
+	}
+	meta := "{}"
+	if len(in.Metadata) > 0 {
+		meta = string(in.Metadata)
+	}
+	a, err := scan(tx.QueryRow(ctx, `
+		INSERT INTO activities (tenant_id, type, subject, body, occurred_at, contact_id, opportunity_id, account_id, metadata, created_by)
+		VALUES (current_tenant(), $1, $2, $3, $4, $5::uuid, $6::uuid, $7::uuid, $8::jsonb, $9)
+		RETURNING `+cols, in.Type, in.Subject, in.Body, occurred, in.ContactID, in.OpportunityID, in.AccountID, meta, sc.UserID))
+	if err != nil {
+		return a, err
+	}
+	if err := outbox.RecordEvent(ctx, tx, "activity.logged", a.ID, map[string]any{
+		"activity_id": a.ID, "type": a.Type, "account_id": a.AccountID, "contact_id": a.ContactID, "opportunity_id": a.OpportunityID}); err != nil {
+		return a, err
+	}
+	return a, audit.Write(ctx, tx, sc.UserID, "activity.logged", "activity", a.ID, nil, nil)
 }
 
 // mutable restricts edits/deletes to the author (admins may touch any).

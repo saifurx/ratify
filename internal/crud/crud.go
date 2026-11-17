@@ -23,7 +23,7 @@ type Q struct {
 }
 
 func (q *Q) Arg(v any) string { q.Args = append(q.Args, v); return fmt.Sprintf("$%d", len(q.Args)) }
-func (q *Q) And(cond string)   { q.conds = append(q.conds, cond) }
+func (q *Q) And(cond string)  { q.conds = append(q.conds, cond) }
 func (q *Q) Where() string {
 	if len(q.conds) == 0 {
 		return ""

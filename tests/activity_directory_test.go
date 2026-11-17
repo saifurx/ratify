@@ -15,7 +15,9 @@ func TestActivities(t *testing.T) {
 	f := newFixture(t)
 	a := f.a
 	acctA, acctB := f.account(f.repA, "A"), f.account(f.repB, "B")
-	log := func(who actor, body map[string]any) map[string]any { return a.want(201, who, "POST", "/api/v1/activities", body) }
+	log := func(who actor, body map[string]any) map[string]any {
+		return a.want(201, who, "POST", "/api/v1/activities", body)
+	}
 
 	t.Run("log a note; created_by is the caller and cannot be forged", func(t *testing.T) {
 		m := log(f.repA, map[string]any{"type": "note", "subject": "hi", "account_id": acctA})

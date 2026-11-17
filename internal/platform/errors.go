@@ -80,4 +80,3 @@ func WriteErr(w http.ResponseWriter, log *slog.Logger, err error) {
 		WriteError(w, http.StatusInternalServerError, "internal error")
 	}
 }
-

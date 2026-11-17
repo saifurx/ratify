@@ -17,7 +17,7 @@ GO = docker run --rm --network $(NET) -v $(CURDIR):/src -w /src \
   -e ADMIN_URL=postgres://postgres:$(POSTGRES_PASSWORD)@postgres:5432/ratify?sslmode=disable \
   $(GO_IMAGE)
 
-.PHONY: init up down migrate test test-py psql seed clean budget security-check tidy
+.PHONY: init up down migrate test test-py psql seed seed-demo clean budget security-check tidy
 init:
 	@./scripts/sync-env.sh
 
@@ -53,6 +53,11 @@ psql:
 
 seed: init
 	@./scripts/seed.sh
+
+# Deterministic demo data (2 tenants, all roles, 2 teams each, 100 accounts, 500
+# contacts, 200 opportunities per tenant). Runs as app_migrator. Idempotent.
+seed-demo: init
+	@$(GO) go run ./cmd/seed-demo
 
 budget: init
 	@python3 scripts/budget.py

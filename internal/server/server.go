@@ -12,6 +12,7 @@ import (
 	"ratify/internal/authz"
 	"ratify/internal/consent"
 	"ratify/internal/contact"
+	"ratify/internal/dashboard"
 	"ratify/internal/db"
 	"ratify/internal/directory"
 	"ratify/internal/graphql"
@@ -21,6 +22,7 @@ import (
 	"ratify/internal/pipeline"
 	"ratify/internal/platform"
 	"ratify/internal/ratelimit"
+	"ratify/internal/search"
 )
 
 type Deps struct {
@@ -65,6 +67,8 @@ func New(d Deps) (http.Handler, error) {
 	pipeline.Register(mux, protect, codec, d.Log, pipeline.NewService(tx))
 	activity.Register(mux, protect, codec, d.Log, activity.NewService(tx))
 	directory.Register(mux, protect, d.Log, directory.NewService(tx))
+	search.Register(mux, protect, d.Log, search.NewService(tx))
+	dashboard.Register(mux, protect, d.Log, dashboard.NewService(tx))
 	gh, err := graphql.New(tx, d.Log)
 	if err != nil {
 		return nil, err

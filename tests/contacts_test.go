@@ -30,7 +30,9 @@ func TestContacts(t *testing.T) {
 	acctB := f.account(f.repB, "B-co")
 	acctT2 := f.account(f.admin2, "T2-co")
 
-	mk := func(who actor, body map[string]any) map[string]any { return a.want(201, who, "POST", "/api/v1/contacts", body) }
+	mk := func(who actor, body map[string]any) map[string]any {
+		return a.want(201, who, "POST", "/api/v1/contacts", body)
+	}
 
 	t.Run("create with consent fields; owner defaults to caller", func(t *testing.T) {
 		m := mk(f.repA, map[string]any{"first_name": "Ada", "last_name": "L", "email": "ada@acme.io", "account_id": acctA,
