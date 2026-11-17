@@ -1,7 +1,7 @@
 # Ratify
 
 Native CRM + AI sales optimization platform. Architecture rules live in
-[CLAUDE.md](CLAUDE.md). Sprints so far: 0.1 tenant isolation, auth, migrations; 0.2 Kafka + transactional outbox.
+[CLAUDE.md](CLAUDE.md). Sprints so far: 0.1 tenant isolation, auth, migrations; 0.2 Kafka + transactional outbox; 1.4a PgBouncer + metrics skeleton.
 
 ## Run
 
@@ -81,3 +81,22 @@ BYPASSRLS role or as `app_migrator`.
   test relays), restarts it afterwards, and prints a `docker stats` snapshot of
   Kafka and the relay. Fresh role changes require `make clean && make up`
   (initdb only runs on an empty volume).
+
+## PgBouncer and metrics (Sprint 1.4a)
+
+- PgBouncer (transaction pooling, `edoburu/pgbouncer:v1.24.1-p1`) fronts
+  Postgres for the API and relay; **migrations connect directly**. Clients are
+  authenticated through `auth_query` (`pgbouncer.user_lookup`, role
+  `pgbouncer_auth`), so new roles need no PgBouncer change. The test suite
+  (`DATABASE_URL`, `RELAY_URL`) also runs through it.
+- `tests/pgbouncer_test.go`: 20 goroutines alternating 4 tenants over a
+  2-connection pool (`ratify_small`), plus unbound queries on reused
+  connections; no request ever sees another tenant's rows. Negative control: a
+  session-scoped binding (`set_config(..., false)`) through the same pooler
+  leaks the tenant to the next client, which is why it is forbidden.
+- `/metrics` on the API (Prometheus; request count, latency histogram, 5xx by
+  route, Go/process stats); Prometheus on `127.0.0.1:9090` scrapes it. Labels
+  carry no tenant, user or email. Outbox lag, dead letters, cross-tenant and
+  backup metrics plus Grafana arrive in 1.4b.
+- `make init` appends variables added to `deploy/.env.example` to an existing
+  `deploy/.env` (never overwrites).

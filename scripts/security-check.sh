@@ -13,5 +13,7 @@ check "no set_config(..., false)" \
   "grep -rniE \"set_config\\([^)]*,[[:space:]]*false\\)\" --include=*.go --include=*.sql . | grep -v '^./promts/'"
 check "Kafka client imports only in internal/outbox, internal/events, cmd/relay" \
   "grep -rl 'twmb/franz-go' --include=*.go . | grep -v -E '^./(internal/outbox|internal/events|cmd/relay)/'"
+check "app services reach Postgres only through PgBouncer (migrate connects directly)" \
+  "grep -nE 'DATABASE_URL:.*@postgres:' deploy/docker-compose.yml | grep -v ferriskey"
 check "compose limits, pins, budget" "python3 scripts/budget.py | grep -E '^(FAIL|  )'"
 exit $fail

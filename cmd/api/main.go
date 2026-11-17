@@ -65,7 +65,9 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
+	metrics := platform.NewMetrics()
 	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", metrics.Handler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		platform.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -77,7 +79,7 @@ func run(log *slog.Logger) error {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           platform.RequestLogger(log, mux),
+		Handler:           metrics.Instrument(platform.RequestLogger(log, mux)),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

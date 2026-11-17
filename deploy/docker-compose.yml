@@ -42,6 +42,34 @@ services:
     volumes: ["../migrations:/migrations:ro"]
     command: ["-path=/migrations", "-database", "postgres://app_migrator:${MIGRATOR_PASSWORD}@postgres:5432/ratify?sslmode=disable", "up"]
 
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.24.1-p1
+    mem_limit: 64m
+    cpus: 0.25
+    depends_on:
+      postgres: {condition: service_healthy}
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    mem_limit: 256m
+    cpus: 0.15
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=1GB
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    ports: ["127.0.0.1:9090:9090"]
+
   kafka:
     image: apache/kafka:4.0.0
     mem_limit: 2g
@@ -78,10 +106,10 @@ services:
     cpus: 0.25
     depends_on:
       kafka: {condition: service_healthy}
-      postgres: {condition: service_healthy}
+      pgbouncer: {condition: service_healthy}
       migrate: {condition: service_completed_successfully}
     environment:
-      DATABASE_URL: postgres://relay_user:${RELAY_USER_PASSWORD}@postgres:5432/ratify?sslmode=disable
+      DATABASE_URL: postgres://relay_user:${RELAY_USER_PASSWORD}@pgbouncer:6432/ratify?sslmode=disable
       KAFKA_BROKERS: kafka:9092
       RELAY_INSTANCE_ID: relay-1
       GOMEMLIMIT: 200MiB
@@ -94,11 +122,12 @@ services:
     cpus: 1.0
     depends_on:
       migrate: {condition: service_completed_successfully}
+      pgbouncer: {condition: service_healthy}
       redis: {condition: service_healthy}
     environment:
       ENV: ${ENV:-development}
       ADDR: ":8080"
-      DATABASE_URL: postgres://app_user:${APP_USER_PASSWORD}@postgres:5432/ratify?sslmode=disable
+      DATABASE_URL: postgres://app_user:${APP_USER_PASSWORD}@pgbouncer:6432/ratify?sslmode=disable
       OIDC_ISSUER: ${OIDC_ISSUER:-}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
     ports: ["127.0.0.1:8080:8080"]
@@ -123,3 +152,4 @@ services:
 volumes:
   pgdata:
   kafkadata:
+  promdata:

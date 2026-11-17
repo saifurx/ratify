@@ -8,16 +8,17 @@ export
 GO = docker run --rm --network $(NET) -v $(CURDIR):/src -w /src \
   -v ratify-gomod:/go/pkg/mod -v ratify-gocache:/root/.cache/go-build \
   -e CGO_ENABLED=0 \
-  -e DATABASE_URL=postgres://app_user:$(APP_USER_PASSWORD)@postgres:5432/ratify?sslmode=disable \
+  -e DATABASE_URL=postgres://app_user:$(APP_USER_PASSWORD)@pgbouncer:6432/ratify?sslmode=disable \
+  -e PGBOUNCER_SMALL_URL=postgres://app_user:$(APP_USER_PASSWORD)@pgbouncer:6432/ratify_small?sslmode=disable \
   -e MIGRATOR_URL=postgres://app_migrator:$(MIGRATOR_PASSWORD)@postgres:5432/ratify?sslmode=disable \
-  -e RELAY_URL=postgres://relay_user:$(RELAY_USER_PASSWORD)@postgres:5432/ratify?sslmode=disable \
+  -e RELAY_URL=postgres://relay_user:$(RELAY_USER_PASSWORD)@pgbouncer:6432/ratify?sslmode=disable \
   -e KAFKA_BROKERS=kafka:9092 \
   -e ADMIN_URL=postgres://postgres:$(POSTGRES_PASSWORD)@postgres:5432/ratify?sslmode=disable \
   $(GO_IMAGE)
 
 .PHONY: init up down migrate test psql seed clean budget security-check tidy
 init:
-	@test -f deploy/.env || { cp deploy/.env.example deploy/.env; echo "created deploy/.env"; }
+	@./scripts/sync-env.sh
 
 up: init
 	$(COMPOSE) up -d --build --wait

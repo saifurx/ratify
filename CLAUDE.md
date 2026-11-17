@@ -163,7 +163,8 @@ Every sprint that adds or changes a service updates this table and
 | pyworker (enrich+score) | 1.2 | 768m    | 0.5  |
 | web (Next.js)      | 1.3    | 512m      | 0.5  |
 | pgbouncer          | 1.4a   | 64m       | 0.25 |
-| prometheus+grafana | 1.4a/b | 512m      | 0.25 |
+| prometheus         | 1.4a   | 256m      | 0.15 |
+| grafana            | 1.4b   | 256m      | 0.10 |
 | temporal (+ui)     | 2.0    | 768m      | 0.5  |
 | worker (Go temporal host) | 2.0 | 256m  | 0.25 |
 | sender (outbox → Postal)  | 2.2 | 256m    | 0.25 |
