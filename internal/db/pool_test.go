@@ -40,9 +40,14 @@ func TestAssertNotPrivileged(t *testing.T) {
 	}
 	defer admin.Close()
 
+	dropProbes := func() {
+		for _, r := range []string{"probe_owner", "probe_bypass"} {
+			_, _ = admin.Exec(ctx, `DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='`+r+`') THEN DROP OWNED BY `+r+`; END IF; END $$`)
+			_, _ = admin.Exec(ctx, `DROP ROLE IF EXISTS `+r)
+		}
+	}
+	dropProbes()
 	for _, s := range []string{
-		`DROP TABLE IF EXISTS public.probe_owned`,
-		`DROP ROLE IF EXISTS probe_owner`, `DROP ROLE IF EXISTS probe_bypass`,
 		`CREATE ROLE probe_owner LOGIN PASSWORD 'pw'`,
 		`CREATE ROLE probe_bypass LOGIN PASSWORD 'pw' BYPASSRLS`,
 		`GRANT CONNECT ON DATABASE ratify TO probe_owner, probe_bypass`,
@@ -53,11 +58,7 @@ func TestAssertNotPrivileged(t *testing.T) {
 			t.Fatalf("%s: %v", s, err)
 		}
 	}
-	t.Cleanup(func() {
-		_, _ = admin.Exec(ctx, `DROP TABLE IF EXISTS public.probe_owned`)
-		_, _ = admin.Exec(ctx, `DROP ROLE IF EXISTS probe_owner`)
-		_, _ = admin.Exec(ctx, `DROP ROLE IF EXISTS probe_bypass`)
-	})
+	t.Cleanup(dropProbes)
 
 	cases := []struct{ name, url, wantErr string }{
 		{"superuser", adminURL, "superuser"},
