@@ -38,12 +38,16 @@ func TestAssertNotPrivileged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer admin.Close()
+	t.Cleanup(admin.Close) // registered first => runs last, after dropProbes
 
 	dropProbes := func() {
 		for _, r := range []string{"probe_owner", "probe_bypass"} {
-			_, _ = admin.Exec(ctx, `DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='`+r+`') THEN DROP OWNED BY `+r+`; END IF; END $$`)
-			_, _ = admin.Exec(ctx, `DROP ROLE IF EXISTS `+r)
+			if _, err := admin.Exec(ctx, `DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='`+r+`') THEN DROP OWNED BY `+r+`; END IF; END $$`); err != nil {
+				t.Errorf("cleanup %s: %v", r, err)
+			}
+			if _, err := admin.Exec(ctx, `DROP ROLE IF EXISTS `+r); err != nil {
+				t.Errorf("cleanup %s: %v", r, err)
+			}
 		}
 	}
 	dropProbes()
