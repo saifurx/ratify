@@ -55,20 +55,15 @@ func (s *Service) Get(ctx context.Context, id string) (c Contact, err error) {
 	return
 }
 
-func (s *Service) Create(ctx context.Context, in Input) (c Contact, err error) {
-	sc, err := authz.Scope(ctx)
-	if err != nil {
-		return c, err
-	}
-	if err := sc.RequireWrite(); err != nil {
-		return c, err
-	}
+// CreateInTx validates and creates a contact inside the caller's tenant
+// transaction (used by lead conversion). The caller has checked RequireWrite.
+func (s *Service) CreateInTx(ctx context.Context, tx db.Tx, sc authz.ScopeInfo, in Input) (Contact, error) {
 	in.Email = trimPtr(in.Email)
 	if in.Email != nil && !strings.Contains(*in.Email, "@") {
-		return c, platform.Invalid{Msg: "email is not valid"}
+		return Contact{}, platform.Invalid{Msg: "email is not valid"}
 	}
 	if strings.TrimSpace(in.FirstName+in.LastName) == "" && in.Email == nil {
-		return c, platform.Invalid{Msg: "a name or an email is required"}
+		return Contact{}, platform.Invalid{Msg: "a name or an email is required"}
 	}
 	if in.ConsentStatus == "" {
 		in.ConsentStatus = "none"
@@ -77,23 +72,35 @@ func (s *Service) Create(ctx context.Context, in Input) (c Contact, err error) {
 		in.OwnerID = &sc.UserID
 	}
 	if !sc.CanWriteOwner(*in.OwnerID) {
-		return c, platform.ErrForbidden
+		return Contact{}, platform.ErrForbidden
 	}
-	err = s.tx.WithTenant(ctx, func(ctx context.Context, tx db.Tx) error {
-		if in.AccountID != nil {
-			if err := sc.RequireVisible(ctx, tx, "accounts", *in.AccountID); err != nil {
-				return err
-			}
+	if in.AccountID != nil {
+		if err := sc.RequireVisible(ctx, tx, "accounts", *in.AccountID); err != nil {
+			return Contact{}, err
 		}
-		var err error
-		if c, err = s.repo.Create(ctx, tx, in); err != nil {
-			return err
-		}
-		if err := outbox.RecordEvent(ctx, tx, "contact.created", c.ID,
-			map[string]any{"contact_id": c.ID, "account_id": c.AccountID, "owner_id": c.OwnerID}); err != nil {
-			return err
-		}
-		return audit.Write(ctx, tx, sc.UserID, "contact.created", "contact", c.ID, nil, c)
+	}
+	c, err := s.repo.Create(ctx, tx, in)
+	if err != nil {
+		return c, err
+	}
+	if err := outbox.RecordEvent(ctx, tx, "contact.created", c.ID,
+		map[string]any{"contact_id": c.ID, "account_id": c.AccountID, "owner_id": c.OwnerID}); err != nil {
+		return c, err
+	}
+	return c, audit.Write(ctx, tx, sc.UserID, "contact.created", "contact", c.ID, nil, c)
+}
+
+func (s *Service) Create(ctx context.Context, in Input) (c Contact, err error) {
+	sc, err := authz.Scope(ctx)
+	if err != nil {
+		return c, err
+	}
+	if err := sc.RequireWrite(); err != nil {
+		return c, err
+	}
+	err = s.tx.WithTenant(ctx, func(ctx context.Context, tx db.Tx) (err error) {
+		c, err = s.CreateInTx(ctx, tx, sc, in)
+		return
 	})
 	return
 }

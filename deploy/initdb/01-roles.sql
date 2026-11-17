@@ -47,3 +47,9 @@ CREATE ROLE tenant_resolver NOLOGIN NOSUPERUSER NOBYPASSRLS;
 -- role's cross-tenant policy does NOT apply to app_migrator.
 GRANT tenant_resolver TO app_migrator WITH INHERIT FALSE, SET TRUE;
 GRANT USAGE, CREATE ON SCHEMA public TO tenant_resolver;
+
+-- Sprint 1.2: Python ML/batch jobs (lead scoring now; embeddings and
+-- forecasting later) connect as ml_worker: not an owner, no BYPASSRLS, tenant
+-- binding per transaction via set_tenant(), per-table least-privilege grants.
+CREATE ROLE ml_worker LOGIN PASSWORD 'ml_worker_dev' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+GRANT CONNECT ON DATABASE ratify TO ml_worker;

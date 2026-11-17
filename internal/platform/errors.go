@@ -32,6 +32,16 @@ type Conflict struct{ Msg string }
 
 func (e Conflict) Error() string { return e.Msg }
 
+// Coded is an error with an explicit HTTP status and a stable machine code
+// (e.g. 403 + "consent_revoked") returned alongside the message.
+type Coded struct {
+	Status int
+	Code   string
+	Msg    string
+}
+
+func (e Coded) Error() string { return e.Msg }
+
 func IsFKViolation(err error) bool {
 	var pe *pgconn.PgError
 	return errors.As(err, &pe) && pe.Code == "23503"
@@ -42,6 +52,7 @@ func IsFKViolation(err error) bool {
 func WriteErr(w http.ResponseWriter, log *slog.Logger, err error) {
 	var inv Invalid
 	var con Conflict
+	var coded Coded
 	var pe *pgconn.PgError
 	switch {
 	case errors.Is(err, ErrNotFound), errors.Is(err, pgx.ErrNoRows):
@@ -50,6 +61,8 @@ func WriteErr(w http.ResponseWriter, log *slog.Logger, err error) {
 		WriteError(w, http.StatusForbidden, "forbidden")
 	case errors.As(err, &inv):
 		WriteError(w, http.StatusBadRequest, inv.Msg)
+	case errors.As(err, &coded):
+		WriteJSON(w, coded.Status, map[string]string{"error": coded.Msg, "code": coded.Code})
 	case errors.As(err, &con):
 		WriteError(w, http.StatusConflict, con.Msg)
 	case errors.As(err, &pe) && pe.Code == "23503":

@@ -43,6 +43,26 @@ func (s *Service) Get(ctx context.Context, id string) (a Account, err error) {
 	return
 }
 
+// CreateInTx validates and creates an account inside the caller's tenant
+// transaction (used by lead conversion). The caller has checked RequireWrite.
+func (s *Service) CreateInTx(ctx context.Context, tx db.Tx, sc authz.ScopeInfo, in Input) (Account, error) {
+	in.Name = strings.TrimSpace(in.Name)
+	if n := len(in.Name); n == 0 || n > 200 {
+		return Account{}, platform.Invalid{Msg: "name must be 1-200 characters"}
+	}
+	if in.OwnerID == nil {
+		in.OwnerID = &sc.UserID
+	}
+	if !sc.CanWriteOwner(*in.OwnerID) {
+		return Account{}, platform.ErrForbidden
+	}
+	a, err := s.repo.Create(ctx, tx, in)
+	if err != nil {
+		return a, err
+	}
+	return a, audit.Write(ctx, tx, sc.UserID, "account.created", "account", a.ID, nil, a)
+}
+
 func (s *Service) Create(ctx context.Context, in Input) (a Account, err error) {
 	sc, err := authz.Scope(ctx)
 	if err != nil {
@@ -51,21 +71,9 @@ func (s *Service) Create(ctx context.Context, in Input) (a Account, err error) {
 	if err := sc.RequireWrite(); err != nil {
 		return a, err
 	}
-	in.Name = strings.TrimSpace(in.Name)
-	if n := len(in.Name); n == 0 || n > 200 {
-		return a, platform.Invalid{Msg: "name must be 1-200 characters"}
-	}
-	if in.OwnerID == nil {
-		in.OwnerID = &sc.UserID
-	}
-	if !sc.CanWriteOwner(*in.OwnerID) {
-		return a, platform.ErrForbidden
-	}
 	err = s.tx.WithTenant(ctx, func(ctx context.Context, tx db.Tx) (err error) {
-		if a, err = s.repo.Create(ctx, tx, in); err != nil {
-			return err
-		}
-		return audit.Write(ctx, tx, sc.UserID, "account.created", "account", a.ID, nil, a)
+		a, err = s.CreateInTx(ctx, tx, sc, in)
+		return
 	})
 	return
 }

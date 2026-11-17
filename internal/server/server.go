@@ -3,20 +3,24 @@
 package server
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 
 	"ratify/internal/account"
 	"ratify/internal/activity"
 	"ratify/internal/authz"
+	"ratify/internal/consent"
 	"ratify/internal/contact"
 	"ratify/internal/db"
 	"ratify/internal/directory"
 	"ratify/internal/graphql"
+	"ratify/internal/lead"
 	"ratify/internal/opportunity"
 	"ratify/internal/pagination"
 	"ratify/internal/pipeline"
 	"ratify/internal/platform"
+	"ratify/internal/ratelimit"
 )
 
 type Deps struct {
@@ -24,6 +28,7 @@ type Deps struct {
 	Pool    *db.Pool
 	Auth    *platform.Auth
 	Metrics *platform.Metrics // optional
+	Limiter *ratelimit.Limiter
 	Log     *slog.Logger
 }
 
@@ -48,9 +53,15 @@ func New(d Deps) (http.Handler, error) {
 		platform.WriteJSON(w, http.StatusOK, map[string]string{"tenant_id": id.TenantID, "user_id": sc.UserID, "role": sc.Role})
 	})))
 
-	account.NewHandler(account.NewService(tx), codec, d.Log).Register(mux, protect)
-	contact.Register(mux, protect, codec, d.Log, contact.NewService(tx))
-	opportunity.Register(mux, protect, codec, d.Log, opportunity.NewService(tx))
+	accounts, contacts, opps := account.NewService(tx), contact.NewService(tx), opportunity.NewService(tx)
+	account.NewHandler(accounts, codec, d.Log).Register(mux, protect)
+	contact.Register(mux, protect, codec, d.Log, contacts)
+	opportunity.Register(mux, protect, codec, d.Log, opps)
+	if d.Limiter == nil {
+		return nil, errors.New("server: a rate limiter (Redis) is required")
+	}
+	lead.NewHandler(lead.NewService(tx, accounts, contacts, opps), d.Pool, d.Limiter, d.Metrics, d.Cfg, d.Log).Register(mux, protect, codec)
+	consent.RegisterAdmin(mux, protect, tx, d.Log)
 	pipeline.Register(mux, protect, codec, d.Log, pipeline.NewService(tx))
 	activity.Register(mux, protect, codec, d.Log, activity.NewService(tx))
 	directory.Register(mux, protect, d.Log, directory.NewService(tx))

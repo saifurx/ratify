@@ -14,9 +14,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/redis/go-redis/v9"
 
 	"ratify/internal/db"
 	"ratify/internal/platform"
+	"ratify/internal/ratelimit"
 	"ratify/internal/server"
 	"ratify/internal/tenant"
 )
@@ -29,20 +31,38 @@ type api struct {
 
 type actor struct{ tenant, subject, role, id string }
 
-func newAPI(t *testing.T) *api {
+type apiOpts struct {
+	logTo   io.Writer
+	observe func(sql string)
+	ipLimit int
+}
+
+func newAPI(t *testing.T) *api { return newAPIOpts(t, apiOpts{}) }
+
+func newAPIOpts(t *testing.T, o apiOpts) *api {
 	t.Helper()
 	ctx := context.Background()
-	pool, err := db.NewPool(ctx, db.RoleApp, env(t, "DATABASE_URL"))
+	pool, err := db.NewObservedPool(ctx, db.RoleApp, env(t, "DATABASE_URL"), o.observe)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	cfg := platform.Config{Env: "development", CursorSecret: "test-secret"}
+	if o.ipLimit == 0 {
+		o.ipLimit = 100000
+	}
+	if o.logTo == nil {
+		o.logTo = io.Discard
+	}
+	cfg := platform.Config{Env: "development", CursorSecret: "test-secret", InboundIPPerMin: o.ipLimit, InboundTenantPerMin: 100000}
 	auth, err := platform.NewAuth(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := server.New(server.Deps{Cfg: cfg, Pool: pool, Auth: auth, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	lim, err := ratelimit.NewFromURL(env(t, "REDIS_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := server.New(server.Deps{Cfg: cfg, Pool: pool, Auth: auth, Limiter: lim, Log: slog.New(slog.NewTextHandler(o.logTo, &slog.HandlerOptions{Level: slog.LevelDebug}))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,4 +184,22 @@ func dbMigrator(t *testing.T) (interface {
 }, error) {
 	t.Helper()
 	return db.RawPoolForTest(context.Background(), env(t, "MIGRATOR_URL"))
+}
+
+func newRedis(t *testing.T) *redis.Client {
+	t.Helper()
+	l, err := ratelimit.NewFromURL(env(t, "REDIS_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l.Client()
+}
+
+func dbRaw(t *testing.T, url string) (interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Close()
+}, error) {
+	t.Helper()
+	return db.RawPoolForTest(context.Background(), url)
 }

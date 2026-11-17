@@ -157,20 +157,15 @@ func (s *Service) Get(ctx context.Context, id string) (o Opportunity, err error)
 	return
 }
 
-func (s *Service) Create(ctx context.Context, in Input) (o Opportunity, err error) {
-	sc, err := authz.Scope(ctx)
-	if err != nil {
-		return o, err
-	}
-	if err := sc.RequireWrite(); err != nil {
-		return o, err
-	}
+// CreateInTx validates and creates an opportunity inside the caller's tenant
+// transaction (used by lead conversion). The caller has checked RequireWrite.
+func (s *Service) CreateInTx(ctx context.Context, tx db.Tx, sc authz.ScopeInfo, in Input) (Opportunity, error) {
 	in.Name = strings.TrimSpace(in.Name)
 	if n := len(in.Name); n == 0 || n > 200 {
-		return o, platform.Invalid{Msg: "name must be 1-200 characters"}
+		return Opportunity{}, platform.Invalid{Msg: "name must be 1-200 characters"}
 	}
 	if in.AccountID == "" || in.StageID == "" {
-		return o, platform.Invalid{Msg: "account_id and stage_id are required"}
+		return Opportunity{}, platform.Invalid{Msg: "account_id and stage_id are required"}
 	}
 	if in.Currency == "" {
 		in.Currency = "USD"
@@ -179,30 +174,43 @@ func (s *Service) Create(ctx context.Context, in Input) (o Opportunity, err erro
 		in.OwnerID = &sc.UserID
 	}
 	if !sc.CanWriteOwner(*in.OwnerID) {
-		return o, platform.ErrForbidden
+		return Opportunity{}, platform.ErrForbidden
 	}
-	err = s.tx.WithTenant(ctx, func(ctx context.Context, tx db.Tx) error {
-		if err := sc.RequireVisible(ctx, tx, "accounts", in.AccountID); err != nil {
-			return err
-		}
-		pipelineID, phase, err := stageInfo(ctx, tx, in.StageID)
-		if err != nil {
-			return err
-		}
-		if in.PipelineID != nil && *in.PipelineID != pipelineID {
-			return platform.Invalid{Msg: "stage does not belong to pipeline_id"}
-		}
-		if o, err = scan(tx.QueryRow(ctx, `
-			INSERT INTO opportunities (tenant_id, name, account_id, pipeline_id, stage_id, amount_cents, currency, close_date, owner_id, status)
-			VALUES (current_tenant(), $1, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7::date, $8::uuid, $9)
-			RETURNING `+cols, in.Name, in.AccountID, pipelineID, in.StageID, in.AmountCents, in.Currency, in.CloseDate, in.OwnerID, statusFor(phase))); err != nil {
-			return err
-		}
-		if err := outbox.RecordEvent(ctx, tx, "opportunity.created", o.ID, map[string]any{
-			"opportunity_id": o.ID, "account_id": o.AccountID, "stage_id": o.StageID, "owner_id": o.OwnerID, "amount_cents": o.AmountCents}); err != nil {
-			return err
-		}
-		return audit.Write(ctx, tx, sc.UserID, "opportunity.created", "opportunity", o.ID, nil, o)
+	if err := sc.RequireVisible(ctx, tx, "accounts", in.AccountID); err != nil {
+		return Opportunity{}, err
+	}
+	pipelineID, phase, err := stageInfo(ctx, tx, in.StageID)
+	if err != nil {
+		return Opportunity{}, err
+	}
+	if in.PipelineID != nil && *in.PipelineID != pipelineID {
+		return Opportunity{}, platform.Invalid{Msg: "stage does not belong to pipeline_id"}
+	}
+	o, err := scan(tx.QueryRow(ctx, `
+		INSERT INTO opportunities (tenant_id, name, account_id, pipeline_id, stage_id, amount_cents, currency, close_date, owner_id, status)
+		VALUES (current_tenant(), $1, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7::date, $8::uuid, $9)
+		RETURNING `+cols, in.Name, in.AccountID, pipelineID, in.StageID, in.AmountCents, in.Currency, in.CloseDate, in.OwnerID, statusFor(phase)))
+	if err != nil {
+		return o, err
+	}
+	if err := outbox.RecordEvent(ctx, tx, "opportunity.created", o.ID, map[string]any{
+		"opportunity_id": o.ID, "account_id": o.AccountID, "stage_id": o.StageID, "owner_id": o.OwnerID, "amount_cents": o.AmountCents}); err != nil {
+		return o, err
+	}
+	return o, audit.Write(ctx, tx, sc.UserID, "opportunity.created", "opportunity", o.ID, nil, o)
+}
+
+func (s *Service) Create(ctx context.Context, in Input) (o Opportunity, err error) {
+	sc, err := authz.Scope(ctx)
+	if err != nil {
+		return o, err
+	}
+	if err := sc.RequireWrite(); err != nil {
+		return o, err
+	}
+	err = s.tx.WithTenant(ctx, func(ctx context.Context, tx db.Tx) (err error) {
+		o, err = s.CreateInTx(ctx, tx, sc, in)
+		return
 	})
 	return
 }

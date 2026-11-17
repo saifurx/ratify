@@ -1,0 +1,8 @@
+numpy==2.2.6
+xgboost==3.0.2
+psycopg[binary]==3.2.9
+psycopg-pool==3.2.6
+confluent-kafka==2.10.1
+redis==6.2.0
+httpx==0.28.1
+pytest==8.4.1

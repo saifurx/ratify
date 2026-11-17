@@ -13,10 +13,11 @@ GO = docker run --rm --network $(NET) -v $(CURDIR):/src -w /src \
   -e MIGRATOR_URL=postgres://app_migrator:$(MIGRATOR_PASSWORD)@postgres:5432/ratify?sslmode=disable \
   -e RELAY_URL=postgres://relay_user:$(RELAY_USER_PASSWORD)@pgbouncer:6432/ratify?sslmode=disable \
   -e KAFKA_BROKERS=kafka:9092 \
+  -e REDIS_URL=redis://redis:6379/0 \
   -e ADMIN_URL=postgres://postgres:$(POSTGRES_PASSWORD)@postgres:5432/ratify?sslmode=disable \
   $(GO_IMAGE)
 
-.PHONY: init up down migrate test psql seed clean budget security-check tidy
+.PHONY: init up down migrate test test-py psql seed clean budget security-check tidy
 init:
 	@./scripts/sync-env.sh
 
@@ -33,8 +34,13 @@ tidy:
 	$(GO) go mod tidy
 
 # Runs unit + isolation tests as app_user (seeding as app_migrator).
+# Python unit tests run inside the pyworker image (no infrastructure needed).
+test-py: init
+	@docker build -q -f deploy/Dockerfile.pyworker -t ratify-pyworker:0.1.0 . >/dev/null
+	@docker run --rm ratify-pyworker:0.1.0 python -m pytest -q /app/pyworker/tests -p no:cacheprovider
+
 # The compose relay is stopped during tests so it cannot race the test relays.
-test: init
+test: init test-py
 	@$(COMPOSE) stop relay >/dev/null 2>&1 || true
 	@$(GO) go test -count=1 -p 1 -tags dbtest ./... ; rc=$$?; \
 	  $(COMPOSE) start relay >/dev/null 2>&1 || true; \

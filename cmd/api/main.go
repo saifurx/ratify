@@ -13,6 +13,7 @@ import (
 
 	"ratify/internal/db"
 	"ratify/internal/platform"
+	"ratify/internal/ratelimit"
 	"ratify/internal/server"
 )
 
@@ -65,7 +66,17 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	handler, err := server.New(server.Deps{Cfg: cfg, Pool: pool, Auth: auth, Metrics: platform.NewMetrics(), Log: log})
+	if cfg.RedisURL == "" {
+		return errors.New("REDIS_URL is required")
+	}
+	limiter, err := ratelimit.NewFromURL(cfg.RedisURL)
+	if err != nil {
+		return err
+	}
+	if err := limiter.Ping(ctx); err != nil { // fail closed at boot
+		return err
+	}
+	handler, err := server.New(server.Deps{Cfg: cfg, Pool: pool, Auth: auth, Metrics: platform.NewMetrics(), Limiter: limiter, Log: log})
 	if err != nil {
 		return err
 	}

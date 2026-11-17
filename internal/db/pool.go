@@ -25,9 +25,24 @@ type Pool struct {
 	role Role
 }
 
+// queryObserver receives every SQL statement text (tests assert statement
+// ordering with it; it is nil in production).
+type queryObserver struct{ fn func(sql string) }
+
+func (o queryObserver) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	o.fn(d.SQL)
+	return ctx
+}
+func (queryObserver) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
 // NewPool builds a pool for the given role. The connection's current_user
 // is NOT trusted to match: call AssertNotPrivileged before serving.
 func NewPool(ctx context.Context, role Role, url string) (*Pool, error) {
+	return NewObservedPool(ctx, role, url, nil)
+}
+
+// NewObservedPool is NewPool plus a per-statement observer (may be nil).
+func NewObservedPool(ctx context.Context, role Role, url string, observe func(sql string)) (*Pool, error) {
 	switch role {
 	case RoleApp, RoleRelay:
 	default:
@@ -40,6 +55,9 @@ func NewPool(ctx context.Context, role Role, url string) (*Pool, error) {
 	// Extended protocol without a prepared-statement cache: safe behind
 	// PgBouncer in transaction mode (Sprint 1.4a).
 	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
+	if observe != nil {
+		cfg.ConnConfig.Tracer = queryObserver{fn: observe}
+	}
 	p, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("db: new pool: %w", err)
@@ -90,4 +108,18 @@ func assertNotPrivileged(ctx context.Context, q rowQuerier, expected Role) error
 		return fmt.Errorf("db: connected as %q, expected %q", user, expected)
 	}
 	return nil
+}
+
+// ResolveTenantToken maps a public form token to a tenant id through the
+// narrow SECURITY DEFINER function (no tenant context exists yet). It
+// returns "" for an unknown token and reveals nothing else.
+func (p *Pool) ResolveTenantToken(ctx context.Context, token string) (string, error) {
+	var id *string
+	if err := p.p.QueryRow(ctx, `SELECT resolve_tenant_token($1)::text`, token).Scan(&id); err != nil {
+		return "", err
+	}
+	if id == nil {
+		return "", nil
+	}
+	return *id, nil
 }

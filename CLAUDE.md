@@ -86,6 +86,23 @@ untrusted with respect to each other.
   (Sprint 2.0). Responses of tenant-owned records embed `httpx.TenantOwned`
   (carries `tenant_id`) from the first handler on (Sprint 1.1).
 
+## Consent and enrichment rules (Sprint 1.2)
+
+- `consent.CanContact(ctx, tx, email)` is the ONLY implementation of "may we
+  contact this person"; conversion, sequences, the sender and agents all call
+  it. Rule: (current consent granted) OR (legitimate_interest basis AND no
+  explicit revoke), AND not suppressed, AND not do_not_contact. Consent is
+  keyed by EMAIL in the append-only `consent_ledger`; it never transfers
+  between addresses. Refusals carry a stable reason code.
+- Public ingestion checks suppression BEFORE any write; a suppressed
+  submission is indistinguishable from success and is only ever counted.
+- Enrichment crawls attacker-influenced domains: the crawler must keep the
+  SSRF guard (public addresses only, connect to the validated IP, no
+  off-site redirects) and robots.txt compliance. `global:enrich:{domain}` is
+  the one intentionally cross-tenant Redis namespace (public website data).
+- Scores from a model trained on synthetic data have a `synthetic-`
+  model_version and MUST be shown as "preliminary".
+
 ## Migration number ranges
 
 Sprints may run in parallel worktrees, so each owns a range: 0.x = 0001-0099,
@@ -165,7 +182,7 @@ Every sprint that adds or changes a service updates this table and
 | api                | 0.1    | 512m      | 1.0  |
 | kafka              | 0.2    | 2g        | 1.0  |
 | relay              | 0.2    | 256m      | 0.25 |
-| pyworker (enrich+score) | 1.2 | 768m    | 0.5  |
+| pyworker (enrich+score) | 1.2 | 768m    | 0.5  |  (internal /score on :8090, service token, no host port)
 | web (Next.js)      | 1.3    | 512m      | 0.5  |
 | pgbouncer          | 1.4a   | 64m       | 0.25 |
 | prometheus         | 1.4a   | 256m      | 0.15 |

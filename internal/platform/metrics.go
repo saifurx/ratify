@@ -19,6 +19,7 @@ type Metrics struct {
 	requests *prometheus.CounterVec
 	errors   *prometheus.CounterVec
 	latency  *prometheus.HistogramVec
+	inbound  *prometheus.CounterVec
 }
 
 func NewMetrics() *Metrics {
@@ -35,7 +36,10 @@ func NewMetrics() *Metrics {
 			Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5}},
 			[]string{"route"}),
 	}
-	m.reg.MustRegister(m.requests, m.errors, m.latency,
+	m.inbound = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ratify_inbound_leads_total", Help: "Public lead submissions by outcome (no tenant or contact labels)."},
+		[]string{"outcome"})
+	m.reg.MustRegister(m.inbound, m.requests, m.errors, m.latency,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	return m
 }
@@ -62,4 +66,13 @@ func (m *Metrics) Instrument(next http.Handler) http.Handler {
 			m.errors.WithLabelValues(route).Inc()
 		}
 	})
+}
+
+// Inbound counts a public lead submission outcome ("accepted", "suppressed",
+// "rate_limited", "invalid", "unknown_token"). Suppression is only ever
+// counted here: never logged, never labelled with a tenant or an address.
+func (m *Metrics) Inbound(outcome string) {
+	if m != nil {
+		m.inbound.WithLabelValues(outcome).Inc()
+	}
 }

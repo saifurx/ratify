@@ -1,0 +1,10 @@
+FROM python:3.12.8-slim-bookworm
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app
+WORKDIR /app
+COPY agents/pyworker/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+COPY agents/pyworker /app/pyworker
+RUN useradd --system --uid 10001 --no-create-home worker
+USER worker
+EXPOSE 8090
+CMD ["python", "-m", "pyworker.main"]

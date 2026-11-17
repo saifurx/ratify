@@ -1,7 +1,7 @@
 # Ratify
 
 Native CRM + AI sales optimization platform. Architecture rules live in
-[CLAUDE.md](CLAUDE.md). Sprints so far: 0.1 tenant isolation, auth, migrations; 0.2 Kafka + transactional outbox; 1.4a PgBouncer + metrics skeleton; 1.1 users/teams/authz + CRM API.
+[CLAUDE.md](CLAUDE.md). Sprints so far: 0.1 tenant isolation, auth, migrations; 0.2 Kafka + transactional outbox; 1.4a PgBouncer + metrics skeleton; 1.1 users/teams/authz + CRM API; 1.2 leads, consent, enrichment, scoring v0.
 
 ## Run
 
@@ -139,3 +139,49 @@ that return only the tenant id.
 `make security-check` also lints the live schema (RLS enabled and forced,
 `UNIQUE (tenant_id, id)`, composite FKs, only the two documented cross-tenant
 policies, no BYPASSRLS) and rejects tenant filters in repositories.
+
+## Leads, consent, enrichment, scoring (Sprint 1.2)
+
+**Hosted form.** `POST /api/v1/inbound/leads?tenant_token=<public token>` (no
+auth). The tenant is resolved from the token by a SECURITY DEFINER function
+(unknown token: 404). JSON body: `email` (required), `first_name`, `last_name`,
+`company`, `domain`, `source`, `consent` (boolean); UTM params come from the
+query string, the referrer from the `Referer` header; IP and user agent go to
+the consent ledger. It sets a first-party `ratify_sid` cookie (no third-party
+tracking). Rate limits: per IP (global) and per tenant, per tenant and IP, in
+Redis with `t:{tenant_id}:` / `global:` keys (`INBOUND_RATE_*` env); Redis down
+means 503 (fail closed). The response is always `202 {"status":"received"}`.
+
+**Suppression and consent.** Suppression (email or domain) is checked
+synchronously before any write; a suppressed submission returns exactly the
+same status, body and cookie and stores nothing: no lead, no ledger row, no
+event, no log line (only the `ratify_inbound_leads_total{outcome}` counter).
+Dedupe: same email merges into the existing lead (first_captured_at kept,
+consent event appended). Same company domain + name under a different email is
+only flagged `possible_duplicate_of`; consent never transfers between
+addresses. `POST /api/v1/leads/{id}/convert` requires `consent.CanContact`
+(403 with a reason code otherwise) and creates account, contact and
+opportunity in one transaction. Admins manage `/api/v1/suppressions`
+(add/list only; suppression is permanent).
+
+**Enrichment and scoring (Python `pyworker`).** Consumes `lead.created` /
+`lead.updated`, enriches the company domain asynchronously (a lead is usable
+immediately), then writes a versioned `lead_scores` row and emits `lead.scored`.
+It runs as the `ml_worker` DB role (tenant-scoped, column-level grants, no
+BYPASSRLS) through PgBouncer.
+- Crawler: native, robots.txt first, per-host rate limit (Redis), 7-day cache at
+  `global:enrich:{domain}` (public data, cross-tenant by design), only public IPs
+  (SSRF guard, connects to the validated address, never follows off-site
+  redirects). RDAP is used for domain age; no paid enrichment APIs.
+  Provenance (HTML hash + parsed fields) goes to `enrichment_raw`.
+- Scoring v0: XGBoost trained on a documented synthetic dataset
+  (`agents/pyworker/model.py`: seed 7, n=4000). `model_version` is
+  `synthetic-v0-<hash>`, so the UI must label the score **preliminary**. Same
+  (features, model_version) gives the same score and reasons (SHAP-style top
+  contributions). The internal `POST /score` (port 8090, `PYWORKER_SERVICE_TOKEN`)
+  is not routed through the public API and publishes no host port.
+- Measured, not asserted: cold crawl of a public site (robots.txt + page over
+  TLS) took ~120-150 ms, RDAP ~0.7-0.9 s. With a cache hit, `lead.created` was
+  dispatched ~30 ms and `lead.scored` ~60 ms after the form POST locally.
+- `make test` also runs the Python tests (`make test-py`) inside the worker
+  image; test lead domains use `.test` so no test ever crawls a real site.
