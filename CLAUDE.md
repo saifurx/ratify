@@ -103,6 +103,22 @@ untrusted with respect to each other.
 - Scores from a model trained on synthetic data have a `synthetic-`
   model_version and MUST be shown as "preliminary".
 
+## Web UI and authentication (Sprint 1.3)
+
+- The browser talks ONLY to the Next.js BFF (`/api/bff/*`); the BFF adds the
+  credentials from the encrypted Auth.js session cookie and calls the Go API.
+  Tenant, user and role never come from the URL, a form field, client state
+  or a request header. The BFF refuses `tenant_id` in queries/bodies and drops
+  every browser header except its own.
+- OIDC contract (FerrisKey): one realm per tenant; the ID token must carry a
+  `tenant_id` claim (UUID of the Ratify tenant) and a `roles` claim using the
+  role vocabulary above. The web app forwards the ID token as the bearer
+  token (its audience is the client id the API verifies).
+- Dev login (seeded personas) exists only when `OIDC_ISSUER` is empty AND
+  `APP_ENV != production`, mirroring the API's dev mode.
+- The UI mirrors `authz.Scope`; it never replaces it. Server-side checks are
+  authoritative and tested without the UI.
+
 ## Migration number ranges
 
 Sprints may run in parallel worktrees, so each owns a range: 0.x = 0001-0099,
@@ -196,6 +212,8 @@ Every sprint that adds or changes a service updates this table and
 | asr (local only; does NOT fit this instance — use hosted ASR) | 4.1 | n/a | |
 | chromium (pdf)     | 5.1    | 512m      | 0.25 |
 | ferriskey (oidc)   | 1.3    | 512m      | 0.25 |
+| ferriskey-migrate (one-shot) | 1.3 | 128m  | 0.25 |
+| ferriskey-console (profile ops, opt-in) | 1.3 | 128m | 0.1 |
 
 Adjust values as measured; never exceed the cap without trimming elsewhere.
 

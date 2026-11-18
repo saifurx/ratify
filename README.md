@@ -1,7 +1,7 @@
 # Ratify
 
 Native CRM + AI sales optimization platform. Architecture rules live in
-[CLAUDE.md](CLAUDE.md). Sprints so far: 0.1 tenant isolation, auth, migrations; 0.2 Kafka + transactional outbox; 1.4a PgBouncer + metrics skeleton; 1.1 users/teams/authz + CRM API; 1.2 leads, consent, enrichment, scoring v0.
+[CLAUDE.md](CLAUDE.md). Sprints so far: 0.1 tenant isolation, auth, migrations; 0.2 Kafka + transactional outbox; 1.4a PgBouncer + metrics skeleton; 1.1 users/teams/authz + CRM API; 1.2 leads, consent, enrichment, scoring v0; 1.3 Next.js UI.
 
 ## Run
 
@@ -185,3 +185,45 @@ BYPASSRLS) through PgBouncer.
   dispatched ~30 ms and `lead.scored` ~60 ms after the form POST locally.
 - `make test` also runs the Python tests (`make test-py`) inside the worker
   image; test lead domains use `.test` so no test ever crawls a real site.
+
+## Web UI (Sprint 1.3)
+
+Next.js 15 (App Router, TypeScript, Tailwind, shadcn-style components) in
+`web/`, served on <http://localhost:3000>.
+
+```bash
+make up          # includes web and ferriskey
+make seed-demo   # 2 tenants, every role, 2 teams each; 100 accounts, 500 contacts, 200 deals per tenant
+open http://localhost:3000   # demo login: pick a seeded user (development only)
+make test-web    # typecheck + Vitest
+make test-ui     # Playwright end-to-end (builds web, runs a Playwright container on the compose network)
+```
+
+Screens: login/logout, dashboard (pipeline value by stage, my open deals,
+recent activity), accounts and contacts (list + detail with contacts,
+opportunities and activity tabs), pipeline board (drag a card to change stage;
+a stage menu is the keyboard fallback), activity composer (notes and call logs
+only), lead inbox (scores labelled "preliminary" for synthetic models; Convert
+is disabled with the reason when `consent.CanContact` is false), global search
+(`GET /api/v1/search`, PostgreSQL full-text, scoped like the lists) and an
+admin-only settings placeholder. Every mutation goes through the API; errors
+render as toasts with the API's own message.
+
+**Authentication.** Auth.js v5 with a custom OIDC provider for FerrisKey
+(`ghcr.io/ferriskey/ferriskey-api:0.10.2`, pinned, default-on in Compose; the
+admin console is opt-in with `--profile ops`). The default `admin/admin` is
+replaced by `FERRISKEY_ADMIN_*` in `deploy/.env`.
+- Claim mapping: **one realm per tenant**. Tokens must carry `tenant_id` (the
+  Ratify tenant UUID, as a custom claim/protocol mapper) and `roles` (any of
+  `rep, manager, admin, finance, legal`). The BFF forwards the ID token; the API
+  derives the tenant from `tenant_id` only. Set `OIDC_ISSUER`, `OIDC_CLIENT_ID`
+  and `OIDC_CLIENT_SECRET` for the web app and `OIDC_ISSUER`/`OIDC_CLIENT_ID`
+  for the API (same client). **Not verified end to end in this sprint**: FerrisKey's
+  documentation does not describe how to add custom claims, so creating the
+  `tenant_id`/`roles` mapper in a realm is an operator step to validate against
+  a real realm; the e2e suite exercises the UI through dev login.
+- Never client-supplied tenant: enforced by the BFF (see CLAUDE.md) and covered by
+  an e2e test that injects an `X-Tenant-Id` header, a `tenant_id` query and body.
+- Dev login is compiled in only as a code path gated on `OIDC_ISSUER == ""` and
+  `APP_ENV != production`; with `APP_ENV=production` and no issuer the web app
+  refuses to start.

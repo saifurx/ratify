@@ -163,17 +163,73 @@ services:
       timeout: 3s
       retries: 20
 
-  # Profile-gated until Sprint 1.3. Image must be a verified pinned tag.
+  # FerrisKey (OIDC). Official images, pinned. Realm-per-tenant, tokens carry
+  # tenant_id and roles claims: see README "Authentication". Its database lives
+  # in the shared Postgres (database `ferriskey`, role ferriskey_user) and it
+  # connects directly (it needs DDL/migrations; it is not an app service).
+  ferriskey-migrate:
+    image: ghcr.io/ferriskey/ferriskey-api:0.10.2
+    mem_limit: 128m
+    cpus: 0.25
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+    entrypoint: ["sqlx", "migrate", "run", "--source", "/usr/local/src/ferriskey/migrations"]
+    environment:
+      DATABASE_URL: postgresql://ferriskey_user:${FERRISKEY_PASSWORD}@postgres:5432/ferriskey
+
   ferriskey:
-    profiles: ["oidc"]
-    image: ${FERRISKEY_IMAGE}
+    image: ghcr.io/ferriskey/ferriskey-api:0.10.2
     mem_limit: 512m
     cpus: 0.25
     depends_on:
-      postgres: {condition: service_healthy}
+      ferriskey-migrate: {condition: service_completed_successfully}
     environment:
-      DATABASE_URL: postgres://ferriskey_user:${FERRISKEY_PASSWORD}@postgres:5432/ferriskey?sslmode=disable
+      DATABASE_HOST: postgres
+      DATABASE_NAME: ferriskey
+      DATABASE_USER: ferriskey_user
+      DATABASE_PASSWORD: ${FERRISKEY_PASSWORD}
+      ALLOWED_ORIGINS: http://localhost:3000,http://localhost:5555
+      WEBAPP_URL: http://localhost:5555
+      ADMIN_USERNAME: ${FERRISKEY_ADMIN_USER}
+      ADMIN_PASSWORD: ${FERRISKEY_ADMIN_PASSWORD}
+      ADMIN_EMAIL: ${FERRISKEY_ADMIN_EMAIL}
     ports: ["127.0.0.1:3333:3333"]
+    restart: unless-stopped
+
+  # Admin console for realms/clients; opt-in (`--profile ops`).
+  ferriskey-console:
+    profiles: ["ops"]
+    image: ghcr.io/ferriskey/ferriskey-webapp:0.10.2
+    mem_limit: 128m
+    cpus: 0.1
+    environment:
+      API_URL: http://localhost:3333
+    ports: ["127.0.0.1:5555:80"]
+
+  web:
+    build: {context: ../web, dockerfile: ../deploy/Dockerfile.web}
+    image: ratify-web:0.1.0
+    mem_limit: 512m
+    cpus: 0.5
+    depends_on:
+      api: {condition: service_healthy}
+    environment:
+      API_URL: http://api:8080
+      AUTH_SECRET: ${AUTH_SECRET}
+      AUTH_TRUST_HOST: "true"
+      APP_ENV: ${ENV:-development}
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+    ports: ["127.0.0.1:3000:3000"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/login"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
 
 volumes:
   pgdata:
